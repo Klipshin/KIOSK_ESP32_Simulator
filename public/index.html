@@ -1,0 +1,884 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Port Kiosk Tester</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        :root {
+            --primary: #005f9e;
+            --primary-dark: #003d6b;
+            --accent: #ff9f1c;
+            --dark: #0a192f;
+            --darker: #050d1a;
+            --light: #e6f1ff;
+            --success: #2ecc71;
+            --danger: #e74c3c;
+            --glass: rgba(10, 25, 47, 0.85);
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+        
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: linear-gradient(135deg, var(--darker) 0%, var(--dark) 100%);
+            color: var(--light);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Background Video Styles */
+        .bg-video {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            object-fit: cover;
+            z-index: -2;
+            opacity: 0;
+            transition: opacity 1.5s ease-in-out;
+        }
+
+        .bg-video.loaded {
+            opacity: 1;
+        }
+
+        .bg-video-fallback {
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(135deg, #050d1a 0%, #0a192f 100%);
+            z-index: -1;
+        }
+
+        .video-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(5, 13, 26, 0.65); /* Darkens video for text contrast */
+            z-index: -1;
+            pointer-events: none;
+        }
+
+        .kiosk-container {
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 20px;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Header */
+        header {
+            text-align: center;
+            padding: 25px 0;
+            border-bottom: 2px solid rgba(255,255,255,0.1);
+            margin-bottom: 30px;
+        }
+
+        header h1 {
+            font-size: 2.2em;
+            letter-spacing: 2px;
+            background: linear-gradient(45deg, #fff, var(--accent));
+            background-clip: text;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 8px;
+        }
+
+        .status-bar {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-top: 12px;
+            flex-wrap: wrap;
+        }
+
+        .status-badge {
+            background: rgba(255,255,255,0.05);
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-size: 0.8em;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .status-badge span { font-weight: bold; }
+        .status-online { color: var(--success); }
+        .status-offline { color: var(--danger); }
+
+        /* Mode Selection Screen */
+        .mode-selection {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            margin-top: 40px;
+        }
+
+        .mode-card {
+            background: rgba(10, 25, 47, 0.75); /* Slightly more opaque than before */
+            border: 2px solid rgba(255,255,255,0.1);
+            border-radius: 20px;
+            padding: 50px 30px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+        }
+
+        .mode-card:hover {
+            transform: translateY(-8px);
+            border-color: var(--accent);
+            box-shadow: 0 15px 40px rgba(255,159,28,0.2);
+        }
+
+        .mode-icon { font-size: 4em; margin-bottom: 20px; display: block; }
+        .mode-title { font-size: 1.8em; font-weight: 700; margin-bottom: 10px; }
+        .mode-desc { color: rgba(255,255,255,0.6); font-size: 0.95em; line-height: 1.5; }
+
+        /* Route Selection */
+        .route-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .route-card {
+            background: var(--glass);
+            border: 2px solid rgba(255,255,255,0.1);
+            border-radius: 15px;
+            padding: 25px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            position: relative;
+        }
+
+        .route-card:hover {
+            border-color: var(--primary);
+            transform: translateY(-3px);
+        }
+
+        .route-card.selected {
+            border-color: var(--accent);
+            background: rgba(255,159,28,0.1);
+        }
+
+        .route-from-to {
+            font-size: 1.3em;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+
+        .route-arrow { color: var(--accent); margin: 0 8px; }
+        .route-meta { color: rgba(255,255,255,0.5); font-size: 0.85em; margin-bottom: 12px; }
+        .route-price { font-size: 1.6em; color: var(--accent); font-weight: bold; }
+
+        /* Passenger Counter */
+        .passenger-selector {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 20px;
+            margin: 30px 0;
+            background: var(--glass);
+            padding: 20px;
+            border-radius: 15px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .pax-btn {
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            border: 2px solid var(--primary);
+            background: transparent;
+            color: white;
+            font-size: 1.5em;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .pax-btn:hover { background: var(--primary); }
+        .pax-count { font-size: 2em; font-weight: bold; min-width: 60px; text-align: center; }
+
+        /* Payment Section */
+        .payment-panel {
+            background: var(--glass);
+            border-radius: 20px;
+            padding: 30px;
+            border: 1px solid rgba(255,255,255,0.1);
+            margin-top: 20px;
+        }
+
+        .payment-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .total-display { font-size: 2.2em; color: var(--accent); font-weight: 800; }
+        .paid-display { font-size: 1.4em; color: var(--success); }
+
+        .progress-track {
+            background: rgba(255,255,255,0.1);
+            border-radius: 12px;
+            height: 35px;
+            overflow: hidden;
+            margin-bottom: 20px;
+            position: relative;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--primary), var(--accent));
+            transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 700;
+            font-size: 0.9em;
+            min-width: 50px;
+        }
+
+        .coin-denoms {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            margin: 20px 0;
+            flex-wrap: wrap;
+        }
+
+        .denom-tag {
+            background: rgba(255,255,255,0.05);
+            padding: 8px 18px;
+            border-radius: 20px;
+            font-size: 0.85em;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .denom-tag.active {
+            background: var(--accent);
+            color: var(--dark);
+            font-weight: bold;
+            animation: pulse-glow 0.5s ease;
+        }
+
+        @keyframes pulse-glow {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.15); box-shadow: 0 0 15px var(--accent); }
+            100% { transform: scale(1); }
+        }
+
+        /* Hopper Animation */
+        .hoppers {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin: 25px 0;
+        }
+
+        .hopper-unit {
+            background: rgba(255,255,255,0.03);
+            border: 2px solid rgba(255,255,255,0.08);
+            border-radius: 15px;
+            padding: 25px;
+            text-align: center;
+            transition: all 0.3s;
+        }
+
+        .hopper-unit.dispensing {
+            border-color: var(--accent);
+            box-shadow: 0 0 25px rgba(255,159,28,0.3);
+            animation: hopper-pulse 0.8s infinite alternate;
+        }
+
+        @keyframes hopper-pulse {
+            from { transform: scale(1); }
+            to { transform: scale(1.03); }
+        }
+
+        .hopper-icon { font-size: 2.5em; margin-bottom: 8px; }
+        .hopper-label { font-size: 0.9em; color: rgba(255,255,255,0.5); margin-bottom: 5px; }
+        .hopper-value { font-size: 2.5em; font-weight: 800; color: var(--accent); }
+
+        /* Receipt */
+        .receipt-container {
+            background: #fff;
+            color: #0a192f;
+            border-radius: 12px;
+            padding: 25px;
+            margin-top: 25px;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.82em;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            max-width: 380px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+
+        /* Buttons */
+        .btn-row {
+            display: flex;
+            gap: 15px;
+            margin-top: 25px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            flex: 1;
+            min-width: 140px;
+            padding: 16px 24px;
+            border: none;
+            border-radius: 12px;
+            font-size: 1em;
+            font-weight: 700;
+            cursor: pointer;
+            transition: all 0.2s;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+            color: white;
+        }
+
+        .btn-accent {
+            background: linear-gradient(135deg, var(--accent), #e08a0f);
+            color: var(--dark);
+        }
+
+        .btn-outline {
+            background: transparent;
+            border: 2px solid rgba(255,255,255,0.2);
+            color: white;
+        }
+
+        .btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(0,0,0,0.3);
+        }
+
+        .btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+        /* Status Messages */
+        .status-msg {
+            text-align: center;
+            padding: 18px;
+            border-radius: 12px;
+            margin: 20px 0;
+            font-size: 1.1em;
+            font-weight: 600;
+        }
+
+        .msg-waiting { background: rgba(0,95,158,0.15); border: 1px solid rgba(0,95,158,0.3); color: #4db8ff; }
+        .msg-processing { background: rgba(255,159,28,0.15); border: 1px solid rgba(255,159,28,0.3); color: var(--accent); }
+        .msg-success { background: rgba(46,204,113,0.15); border: 1px solid rgba(46,204,113,0.3); color: var(--success); }
+
+        /* QR Scan Simulation */
+        .qr-scanner {
+            background: var(--glass);
+            border-radius: 20px;
+            padding: 40px;
+            text-align: center;
+            border: 2px dashed rgba(255,255,255,0.2);
+            margin-top: 20px;
+        }
+
+        .qr-placeholder {
+            width: 180px;
+            height: 180px;
+            background: white;
+            margin: 20px auto;
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 5em;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .scan-line {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: var(--accent);
+            box-shadow: 0 0 10px var(--accent);
+            animation: scan-move 2s linear infinite;
+        }
+
+        @keyframes scan-move {
+            0% { top: 0; }
+            50% { top: calc(100% - 3px); }
+            100% { top: 0; }
+        }
+
+        /* Utility */
+        .hidden { display: none !important; }
+        .section-title { font-size: 1.4em; font-weight: 700; margin-bottom: 15px; }
+        .back-link {
+            color: rgba(255,255,255,0.5);
+            cursor: pointer;
+            font-size: 0.9em;
+            margin-bottom: 15px;
+            display: inline-block;
+        }
+        .back-link:hover { color: var(--accent); }
+
+        @media (max-width: 768px) {
+            .mode-selection { grid-template-columns: 1fr; }
+            .hoppers { grid-template-columns: 1fr; }
+            header h1 { font-size: 1.6em; }
+            .total-display { font-size: 1.6em; }
+        }
+    </style>
+</head>
+<body>
+<div class="kiosk-container">
+    <header>
+        <h1>⚓ PORT KIOSK TESTER</h1>
+        <div class="status-bar">
+            <div class="status-badge">Server: <span id="connStatus" class="status-offline">● Offline</span></div>
+            <div class="status-badge">Mode: <span id="modeLabel">IDLE</span></div>
+            <div class="status-badge">ESP32: <span id="hwStatus">Waiting...</span></div>
+        </div>
+    </header>
+
+   <!-- SCREEN 1: Mode Selection with Background Video -->
+<div id="screenMode" class="screen">
+    <!-- Drone Shot Background Video -->
+    <video 
+        id="bgVideo" 
+        autoplay 
+        muted 
+        loop 
+        playsinline
+        preload="auto"
+        class="bg-video"
+    >
+        <source src="/ship.mp4" type="video/mp4">
+        <!-- Fallback gradient if video fails to load -->
+        <div class="bg-video-fallback"></div>
+    </video>
+    
+    <!-- Dark Overlay for Text Readability -->
+    <div class="video-overlay"></div>
+
+    <!-- Mode Selection Cards (Now Above Video) -->
+    <div class="mode-selection">
+        <div class="mode-card" onclick="selectMode('BOOK')">
+            <span class="mode-icon">🎫</span>
+            <div class="mode-title">Book Ticket</div>
+            <div class="mode-desc">Select your route, choose passengers,<br>and pay with coins or bills</div>
+        </div>
+        <div class="mode-card" onclick="selectMode('ONBOARD')">
+            <span class="mode-icon">📱</span>
+            <div class="mode-title">Scan QR / Onboard</div>
+            <div class="mode-desc">Already have a ticket?<br>Scan your QR code to board</div>
+        </div>
+    </div>
+</div>
+
+    <!-- SCREEN 2: Route Selection -->
+    <div id="screenRoutes" class="screen hidden">
+        <div class="back-link" onclick="goHome()">← Back to Home</div>
+        <div class="section-title">Select Your Route</div>
+        <div class="route-grid" id="routeGrid"></div>
+        
+        <div class="passenger-selector">
+            <button class="pax-btn" onclick="changePax(-1)">−</button>
+            <div>
+                <div style="font-size:0.8em;color:rgba(255,255,255,0.5);margin-bottom:4px;">PASSENGERS</div>
+                <div class="pax-count" id="paxCount">1</div>
+            </div>
+            <button class="pax-btn" onclick="changePax(1)">+</button>
+        </div>
+
+        <div class="btn-row">
+            <button class="btn btn-outline" onclick="goHome()">Cancel</button>
+            <button class="btn btn-accent" id="confirmRouteBtn" disabled onclick="confirmRoute()">Proceed to Payment →</button>
+        </div>
+    </div>
+
+    <!-- SCREEN 3: Payment -->
+    <div id="screenPayment" class="screen hidden">
+        <div class="back-link" onclick="goBackToRoutes()">← Change Route</div>
+        <div class="payment-panel">
+            <div class="payment-header">
+                <div>
+                    <div style="font-size:0.85em;color:rgba(255,255,255,0.5);margin-bottom:4px;" id="payRouteLabel">-</div>
+                    <div style="font-size:0.85em;color:rgba(255,255,255,0.4);" id="payPaxLabel">-</div>
+                </div>
+                <div class="total-display" id="totalDisplay">0</div>
+            </div>
+
+            <div class="progress-track">
+                <div class="progress-fill" id="payProgress" style="width:0%">
+                    <span id="progressPct">0%</span>
+                </div>
+            </div>
+
+            <div style="display:flex;justify-content:space-between;margin-bottom:15px;flex-wrap:wrap;gap:10px;">
+                <div class="paid-display">Paid: <span id="paidAmt">₱0</span></div>
+                <div style="color:rgba(255,255,255,0.5);">Remaining: <span id="remainAmt">₱0</span></div>
+            </div>
+
+            <div class="coin-denoms" id="denomTags">
+                <div class="denom-tag" data-d="bill">💵 Bills (50/100/500/1000)</div>
+                <div class="denom-tag" data-d="20"> ₱20</div>
+                <div class="denom-tag" data-d="10">🪙 ₱10</div>
+                <div class="denom-tag" data-d="5">🪙 ₱5</div>
+                <div class="denom-tag" data-d="1">🪙 ₱1</div>
+            </div>
+
+            <div id="payStatusMsg" class="status-msg msg-waiting">
+                Insert coins or bills into the slot...
+            </div>
+
+            <div class="hoppers" id="hopperSection">
+                <div class="hopper-unit" id="hopper10">
+                    <div class="hopper-icon">🔴</div>
+                    <div class="hopper-label">₱10 HOPPER</div>
+                    <div class="hopper-value" id="h10Val">0</div>
+                </div>
+                <div class="hopper-unit" id="hopper1">
+                    <div class="hopper-icon">🔵</div>
+                    <div class="hopper-label">₱1 HOPPER</div>
+                    <div class="hopper-value" id="h1Val">0</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="btn-row">
+            <button class="btn btn-outline" onclick="resetTransaction()">Cancel Transaction</button>
+            <button class="btn btn-primary" id="simPayBtn" onclick="simulatePayment()">▶ Simulate Full Payment</button>
+        </div>
+    </div>
+
+    <!-- SCREEN 4: QR Onboard -->
+    <div id="screenOnboard" class="screen hidden">
+        <div class="back-link" onclick="goHome()">← Back to Home</div>
+        <div class="qr-scanner">
+            <div class="section-title">Scan Your Boarding QR Code</div>
+            <div class="qr-placeholder">
+                📲
+                <div class="scan-line"></div>
+            </div>
+            <div style="color:rgba(255,255,255,0.5);margin:15px 0;">Point your ticket QR code at the scanner</div>
+            <button class="btn btn-accent" onclick="simulateScan()" style="max-width:250px;margin:0 auto;display:block;">
+                🔍 Simulate QR Scan
+            </button>
+        </div>
+    </div>
+
+    <!-- SCREEN 5: Receipt / Success -->
+    <div id="screenReceipt" class="screen hidden">
+        <div class="status-msg msg-success" id="receiptTitle">✅ Ticket Issued Successfully!</div>
+        <div class="receipt-container" id="receiptText"></div>
+        <div class="btn-row" style="max-width:380px;margin:25px auto 0;">
+            <button class="btn btn-primary" onclick="printReceipt()">🖨️ Print Receipt</button>
+            <button class="btn btn-outline" onclick="resetTransaction()">New Transaction</button>
+        </div>
+    </div>
+</div>
+
+<script>
+const socket = io({
+    reconnection: true,
+    reconnectionDelay: 1000,
+    reconnectionAttempts: 10,
+    transports: ['websocket', 'polling'],
+    extraHeaders: {
+        'ngrok-skip-browser-warning': 'true' // Bypasses ngrok interstitial
+    }
+});
+
+let reconnectCount = 0;
+let routes = [];
+let selectedRouteId = null;
+let passengerCount = 1;
+let currentTotal = 0;
+let currentCredit = 0;
+let changeCoins10 = 0;
+let changeCoins1 = 0;
+
+// DOM refs
+const $ = id => document.getElementById(id);
+const screens = ['screenMode','screenRoutes','screenPayment','screenOnboard','screenReceipt'];
+
+function showScreen(id) {
+    screens.forEach(s => $(s).classList.add('hidden'));
+    $(id).classList.remove('hidden');
+}
+
+// Socket Events
+socket.on('connect', () => {
+    console.log('[WS] ✅ Connected successfully');
+    $('connStatus').textContent = '● Online';
+    $('connStatus').className = 'status-online';
+    reconnectCount = 0;
+});
+
+socket.on('disconnect', (reason) => {
+    console.log(`[WS] ❌ Disconnected. Reason: ${reason}`);
+    $('connStatus').textContent = '● Offline';
+    $('connStatus').className = 'status-offline';
+    
+    // Log specific disconnect reasons for debugging
+    if (reason === 'io server disconnect') {
+        console.log('[WS] Server forced disconnect - check server.js Socket.IO config');
+    } else if (reason === 'transport close') {
+        console.log('[WS] Transport closed - likely network issue or page unload');
+    }
+});
+
+socket.on('connect_error', (err) => {
+    console.error('[WS] Connection error:', err.message);
+    reconnectCount++;
+    if (reconnectCount > 5) {
+        console.warn('[WS] Too many reconnect attempts. Check if server is running.');
+    }
+});
+
+socket.on('routes-data', data => {
+    routes = data;
+    renderRoutes();
+});
+
+socket.on('state-update', state => {
+    $('modeLabel').textContent = state.mode;
+    
+    switch(state.mode) {
+        case 'IDLE':
+            showScreen('screenMode');
+            break;
+        case 'BOOKING_ROUTE':
+            showScreen('screenRoutes');
+            break;
+        case 'BOOKING_PAYMENT':
+            showScreen('screenPayment');
+            updatePaymentUI(state);
+            break;
+        case 'ONBOARD_SCAN':
+            showScreen('screenOnboard');
+            break;
+        case 'TICKET_ISSUED':
+            showScreen('screenReceipt');
+            if (state.receipt) {
+                $('receiptText').textContent = state.receipt.text;
+                $('receiptTitle').textContent = state.qrData 
+                    ? '✅ Boarding Verified! Welcome Aboard!' 
+                    : '✅ Ticket Issued Successfully!';
+            }
+            break;
+    }
+});
+
+socket.on('payment-update', data => {
+    currentCredit = data.credit;
+    updatePaymentBar();
+    
+    // Flash denom tag
+    const tag = document.querySelector(`.denom-tag[data-d="${data.device === 'bill_acceptor' ? 'bill' : data.amount}"]`);
+    if (tag) {
+        tag.classList.add('active');
+        setTimeout(() => tag.classList.remove('active'), 600);
+    }
+    
+    $('hwStatus').textContent = `Last: ${data.device} ₱${data.amount}`;
+});
+
+socket.on('dispense-change', data => {
+    changeCoins10 = Math.floor(data.amount / 10);
+    changeCoins1 = data.amount % 10;
+    animateHoppers();
+    $('payStatusMsg').className = 'status-msg msg-processing';
+    $('payStatusMsg').textContent = `🪙 Dispensing ₱${data.amount} change...`;
+});
+
+// Render Routes
+function renderRoutes() {
+    $('routeGrid').innerHTML = routes.map(r => `
+        <div class="route-card" id="route-${r.id}" onclick="pickRoute('${r.id}')">
+            <div class="route-from-to">${r.from} <span class="route-arrow">→</span> ${r.to}</div>
+            <div class="route-meta">Duration: ${r.duration} • Route ${r.id}</div>
+            <div class="route-price">₱${r.price.toLocaleString()}</div>
+        </div>
+    `).join('');
+}
+
+// Navigation Actions
+function selectMode(mode) {
+    fetch('/api/action/select-mode', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ mode })
+    });
+}
+
+function pickRoute(id) {
+    selectedRouteId = id;
+    document.querySelectorAll('.route-card').forEach(c => c.classList.remove('selected'));
+    $(`route-${id}`).classList.add('selected');
+    $('confirmRouteBtn').disabled = false;
+}
+
+function changePax(delta) {
+    passengerCount = Math.max(1, Math.min(10, passengerCount + delta));
+    $('paxCount').textContent = passengerCount;
+    if (selectedRouteId) confirmRoute();
+}
+
+function confirmRoute() {
+    if (!selectedRouteId) return;
+    fetch('/api/action/select-route', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ routeId: selectedRouteId, passengers: passengerCount })
+    });
+}
+
+function simulateScan() {
+    fetch('/api/action/simulate-scan', { method: 'POST' });
+}
+
+function resetTransaction() {
+    fetch('/api/action/reset', { method: 'POST' });
+    selectedRouteId = null;
+    passengerCount = 1;
+    currentCredit = 0;
+    $('paxCount').textContent = '1';
+    $('confirmRouteBtn').disabled = true;
+    $('h10Val').textContent = '0';
+    $('h1Val').textContent = '0';
+    $('hopper10').classList.remove('dispensing');
+    $('hopper1').classList.remove('dispensing');
+}
+
+function goHome() { resetTransaction(); }
+function goBackToRoutes() {
+    fetch('/api/action/reset', { method: 'POST' });
+    showScreen('screenRoutes');
+}
+
+// Payment UI
+function updatePaymentUI(state) {
+    const route = state.selectedRoute;
+    currentTotal = state.totalPrice;
+    currentCredit = state.credit;
+    
+    $('payRouteLabel').textContent = `${route.from} → ${route.to}`;
+    $('payPaxLabel').textContent = `${state.passengerCount} passenger(s) × ₱${route.price.toLocaleString()}`;
+    $('totalDisplay').textContent = `${currentTotal.toLocaleString()}`;
+    updatePaymentBar();
+    
+    $('payStatusMsg').className = 'status-msg msg-waiting';
+    $('payStatusMsg').textContent = 'Insert coins or bills into the slot...';
+    $('hopper10').classList.remove('dispensing');
+    $('hopper1').classList.remove('dispensing');
+    $('h10Val').textContent = '0';
+    $('h1Val').textContent = '0';
+}
+
+function updatePaymentBar() {
+    const pct = Math.min(100, (currentCredit / currentTotal) * 100);
+    $('payProgress').style.width = `${pct}%`;
+    $('progressPct').textContent = `${Math.round(pct)}%`;
+    $('paidAmt').textContent = `₱${currentCredit.toLocaleString()}`;
+    $('remainAmt').textContent = `₱${Math.max(0, currentTotal - currentCredit).toLocaleString()}`;
+}
+
+function animateHoppers() {
+    $('hopper10').classList.add('dispensing');
+    $('hopper1').classList.add('dispensing');
+    
+    let c10 = 0, c1 = 0;
+    const iv = setInterval(() => {
+        if (c10 < changeCoins10) { c10++; $('h10Val').textContent = c10; }
+        if (c1 < changeCoins1) { c1++; $('h1Val').textContent = c1; }
+        if (c10 >= changeCoins10 && c1 >= changeCoins1) {
+            clearInterval(iv);
+            setTimeout(() => {
+                $('hopper10').classList.remove('dispensing');
+                $('hopper1').classList.remove('dispensing');
+            }, 800);
+        }
+    }, 250);
+}
+
+// Simulate full payment via API (for testing without hardware)
+async function simulatePayment() {
+    if (currentCredit >= currentTotal) return;
+    let remaining = currentTotal - currentCredit;
+    const denoms = [1000, 500, 100, 50, 20, 10, 5, 1];
+    
+    for (const d of denoms) {
+        while (remaining >= d) {
+            remaining -= d;
+            await fetch('/api/hardware/event', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify({
+                    device: d >= 50 ? 'bill_acceptor' : 'coin_slot',
+                    amount: d,
+                    credit: currentCredit + d,
+                    timestamp: new Date().toISOString()
+                })
+            });
+            await new Promise(r => setTimeout(r, 400));
+        }
+    }
+}
+
+function printReceipt() {
+    const content = $('receiptText').textContent;
+    const w = window.open('', '_blank', 'width=400,height=600');
+    w.document.write(`<html><head><title>Receipt</title>
+        <style>body{font-family:'Courier New',monospace;padding:20px;max-width:300px;margin:auto}
+        pre{white-space:pre-wrap;font-size:11px;line-height:1.4}</style></head>
+        <body><pre>${content}</pre></body></html>`);
+    w.document.close();
+    w.print();
+}
+
+// Handle background video loading
+const bgVideo = document.getElementById('bgVideo');
+if (bgVideo) {
+    // Show video only when ready to play
+    bgVideo.addEventListener('canplaythrough', () => {
+        bgVideo.classList.add('loaded');
+    }, { once: true });
+
+    // Fallback: show gradient if video takes >3s to load
+    setTimeout(() => {
+        if (!bgVideo.classList.contains('loaded')) {
+            bgVideo.classList.add('loaded'); // Triggers fallback gradient visibility
+        }
+    }, 3000);
+
+    // Pause video when leaving home screen to save resources
+    const observer = new MutationObserver((mutations) => {
+        mutations.forEach(mutation => {
+            if (mutation.target.id === 'screenMode' && mutation.target.classList.contains('hidden')) {
+                bgVideo.pause();
+            } else if (!mutation.target.classList.contains('hidden')) {
+                bgVideo.play().catch(e => console.log('Video play prevented:', e));
+            }
+        });
+    });
+
+    observer.observe(document.getElementById('screenMode'), { attributes: true, attributeFilter: ['class'] });
+}
+</script>
+</body>
+</html>

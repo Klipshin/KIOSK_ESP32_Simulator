@@ -1,0 +1,24 @@
+{
+  "name": "ship-kiosk",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node server.js",
+    "tunnel": "ngrok http 3000 --subdomain=port-kiosk-tester",
+    "start:all": "concurrently \"npm:start\" \"npm:tunnel\"",
+    "dev": "npm run start:all"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "localtunnel": "^2.0.2"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "socket.io": "^4.8.3"
+  }
+}

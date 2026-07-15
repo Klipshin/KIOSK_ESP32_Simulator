@@ -456,7 +456,7 @@
 
    <!-- SCREEN 1: Mode Selection with Background Video -->
 <div id="screenMode" class="screen">
-    <!-- Drone Shot Background Video -->
+    <!-- Drone Shot Background Video (temporarily disabled)
     <video 
         id="bgVideo" 
         autoplay 
@@ -467,9 +467,9 @@
         class="bg-video"
     >
         <source src="/ship.mp4" type="video/mp4">
-        <!-- Fallback gradient if video fails to load -->
         <div class="bg-video-fallback"></div>
     </video>
+    -->
     
     <!-- Dark Overlay for Text Readability -->
     <div class="video-overlay"></div>
@@ -593,7 +593,9 @@
 </div>
 
 <script>
-const socket = io({
+const SOCKET_BASE_URL = 'https://concerned-homework-herald-eligibility.trycloudflare.com';
+
+const socket = io(SOCKET_BASE_URL, {
     reconnection: true,
     reconnectionDelay: 1000,
     reconnectionAttempts: 10,
@@ -851,34 +853,7 @@ function printReceipt() {
     w.print();
 }
 
-// Handle background video loading
-const bgVideo = document.getElementById('bgVideo');
-if (bgVideo) {
-    // Show video only when ready to play
-    bgVideo.addEventListener('canplaythrough', () => {
-        bgVideo.classList.add('loaded');
-    }, { once: true });
-
-    // Fallback: show gradient if video takes >3s to load
-    setTimeout(() => {
-        if (!bgVideo.classList.contains('loaded')) {
-            bgVideo.classList.add('loaded'); // Triggers fallback gradient visibility
-        }
-    }, 3000);
-
-    // Pause video when leaving home screen to save resources
-    const observer = new MutationObserver((mutations) => {
-        mutations.forEach(mutation => {
-            if (mutation.target.id === 'screenMode' && mutation.target.classList.contains('hidden')) {
-                bgVideo.pause();
-            } else if (!mutation.target.classList.contains('hidden')) {
-                bgVideo.play().catch(e => console.log('Video play prevented:', e));
-            }
-        });
-    });
-
-    observer.observe(document.getElementById('screenMode'), { attributes: true, attributeFilter: ['class'] });
-}
+// Background video temporarily disabled.
 </script>
 </body>
 </html>

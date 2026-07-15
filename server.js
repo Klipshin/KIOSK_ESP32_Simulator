@@ -59,8 +59,11 @@ try {
 
     const parser = esp32Port.pipe(new ReadlineParser({ delimiter: '\n' }));
 
+const SERIAL_DEBUG = process.env.SERIAL_DEBUG === 'true';
+
     parser.on('data', (line) => {
         line = line.trim();
+        if (SERIAL_DEBUG) console.log(`[ESP32] ${line}`); // show all raw output in server terminal
         if (!line.startsWith('EVT:')) return; // plain debug log lines — ignore
         try {
             const data = JSON.parse(line.substring(4)); // strip "EVT:" prefix

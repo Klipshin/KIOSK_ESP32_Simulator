@@ -22,9 +22,12 @@ void processSerialCommand(String command);
 const char *ssid = "OLTEK Corp";
 const char *password = "hayahAI2026";
 
-// Your production/local Ngrok tunnel endpoints linked to your server
-const char *kioskApiUrl = "https://concerned-homework-herald-eligibility.trycloudflare.com/api/hardware/event";
-const char *kioskStatusUrl = "https://concerned-homework-herald-eligibility.trycloudflare.com/api/hardware/status";
+// Local server address — update only if your server machine's IP changes.
+// The ESP32 talks directly to the server over LAN; it does NOT need the
+// Cloudflare tunnel URL (that's only for browser access from outside).
+const char *SERVER_HOST = "http://192.168.1.134:3000"; // <-- set to your server PC's local IP
+const char *kioskApiUrl = "http://192.168.1.134:3000/api/hardware/event";
+const char *kioskStatusUrl = "http://192.168.1.134:3000/api/hardware/status";
 
 // ------------------------------------------------------------
 // Pin Configurations (Physical ESP32 Setup)

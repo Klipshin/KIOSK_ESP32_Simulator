@@ -592,19 +592,9 @@
     </div>
 </div>
 
+
 <script>
-const SOCKET_BASE_URL = 'https://concerned-homework-herald-eligibility.trycloudflare.com';
-
-const socket = io(SOCKET_BASE_URL, {
-    reconnection: true,
-    reconnectionDelay: 1000,
-    reconnectionAttempts: 10,
-    transports: ['websocket', 'polling'],
-    extraHeaders: {
-        'ngrok-skip-browser-warning': 'true' // Bypasses ngrok interstitial
-    }
-});
-
+// ---- Shared App State ----
 let reconnectCount = 0;
 let routes = [];
 let selectedRouteId = null;
@@ -614,7 +604,7 @@ let currentCredit = 0;
 let changeCoins10 = 0;
 let changeCoins1 = 0;
 
-// DOM refs
+// DOM helper
 const $ = id => document.getElementById(id);
 const screens = ['screenMode','screenRoutes','screenPayment','screenOnboard','screenReceipt'];
 
@@ -623,90 +613,119 @@ function showScreen(id) {
     $(id).classList.remove('hidden');
 }
 
-// Socket Events
-socket.on('connect', () => {
-    console.log('[WS] ✅ Connected successfully');
-    $('connStatus').textContent = '● Online';
-    $('connStatus').className = 'status-online';
-    reconnectCount = 0;
-});
-
-socket.on('disconnect', (reason) => {
-    console.log(`[WS] ❌ Disconnected. Reason: ${reason}`);
-    $('connStatus').textContent = '● Offline';
-    $('connStatus').className = 'status-offline';
-    
-    // Log specific disconnect reasons for debugging
-    if (reason === 'io server disconnect') {
-        console.log('[WS] Server forced disconnect - check server.js Socket.IO config');
-    } else if (reason === 'transport close') {
-        console.log('[WS] Transport closed - likely network issue or page unload');
+// ---- Socket Initialization ----
+// Fetches tunnel URL from the server (/api/config), so .env is the only file to update.
+async function initSocket() {
+    let tunnelUrl = window.location.origin; // fallback: same origin (works on localhost)
+    try {
+        const res = await fetch('/api/config');
+        const cfg = await res.json();
+        if (cfg.tunnelUrl) tunnelUrl = cfg.tunnelUrl;
+    } catch (e) {
+        console.warn('[Config] Could not fetch /api/config, falling back to same-origin:', e.message);
     }
-});
 
-socket.on('connect_error', (err) => {
-    console.error('[WS] Connection error:', err.message);
-    reconnectCount++;
-    if (reconnectCount > 5) {
-        console.warn('[WS] Too many reconnect attempts. Check if server is running.');
-    }
-});
+    console.log('[WS] Connecting to:', tunnelUrl);
+    const socket = io(tunnelUrl, {
+        reconnection: true,
+        reconnectionDelay: 1000,
+        reconnectionAttempts: 10,
+        transports: ['websocket', 'polling'],
+        extraHeaders: {
+            'ngrok-skip-browser-warning': 'true' // Bypasses ngrok/cloudflare interstitial
+        }
+    });
 
-socket.on('routes-data', data => {
-    routes = data;
-    renderRoutes();
-});
+    // Socket Events
+    socket.on('connect', () => {
+        console.log('[WS] ✅ Connected successfully');
+        $('connStatus').textContent = '● Online';
+        $('connStatus').className = 'status-online';
+        reconnectCount = 0;
+    });
 
-socket.on('state-update', state => {
-    $('modeLabel').textContent = state.mode;
-    
-    switch(state.mode) {
-        case 'IDLE':
-            showScreen('screenMode');
-            break;
-        case 'BOOKING_ROUTE':
-            showScreen('screenRoutes');
-            break;
-        case 'BOOKING_PAYMENT':
-            showScreen('screenPayment');
-            updatePaymentUI(state);
-            break;
-        case 'ONBOARD_SCAN':
-            showScreen('screenOnboard');
-            break;
-        case 'TICKET_ISSUED':
-            showScreen('screenReceipt');
-            if (state.receipt) {
-                $('receiptText').textContent = state.receipt.text;
-                $('receiptTitle').textContent = state.qrData 
-                    ? '✅ Boarding Verified! Welcome Aboard!' 
-                    : '✅ Ticket Issued Successfully!';
-            }
-            break;
-    }
-});
+    socket.on('disconnect', (reason) => {
+        console.log(`[WS] ❌ Disconnected. Reason: ${reason}`);
+        $('connStatus').textContent = '● Offline';
+        $('connStatus').className = 'status-offline';
+        
+        // Log specific disconnect reasons for debugging
+        if (reason === 'io server disconnect') {
+            console.log('[WS] Server forced disconnect - check server.js Socket.IO config');
+        } else if (reason === 'transport close') {
+            console.log('[WS] Transport closed - likely network issue or page unload');
+        }
+    });
 
-socket.on('payment-update', data => {
-    currentCredit = data.credit;
-    updatePaymentBar();
-    
-    // Flash denom tag
-    const tag = document.querySelector(`.denom-tag[data-d="${data.device === 'bill_acceptor' ? 'bill' : data.amount}"]`);
-    if (tag) {
-        tag.classList.add('active');
-        setTimeout(() => tag.classList.remove('active'), 600);
-    }
-    
-    $('hwStatus').textContent = `Last: ${data.device} ₱${data.amount}`;
-});
+    socket.on('connect_error', (err) => {
+        console.error('[WS] Connection error:', err.message);
+        reconnectCount++;
+        if (reconnectCount > 5) {
+            console.warn('[WS] Too many reconnect attempts. Check if server is running.');
+        }
+    });
 
-socket.on('dispense-change', data => {
-    changeCoins10 = Math.floor(data.amount / 10);
-    changeCoins1 = data.amount % 10;
-    animateHoppers();
-    $('payStatusMsg').className = 'status-msg msg-processing';
-    $('payStatusMsg').textContent = `🪙 Dispensing ₱${data.amount} change...`;
-});
+    socket.on('routes-data', data => {
+        routes = data;
+        renderRoutes();
+    });
+
+    socket.on('state-update', state => {
+        $('modeLabel').textContent = state.mode;
+        
+        switch(state.mode) {
+            case 'IDLE':
+                showScreen('screenMode');
+                break;
+            case 'BOOKING_ROUTE':
+                showScreen('screenRoutes');
+                break;
+            case 'BOOKING_PAYMENT':
+                showScreen('screenPayment');
+                updatePaymentUI(state);
+                break;
+            case 'ONBOARD_SCAN':
+                showScreen('screenOnboard');
+                break;
+            case 'TICKET_ISSUED':
+                showScreen('screenReceipt');
+                if (state.receipt) {
+                    $('receiptText').textContent = state.receipt.text;
+                    $('receiptTitle').textContent = state.qrData 
+                        ? '✅ Boarding Verified! Welcome Aboard!' 
+                        : '✅ Ticket Issued Successfully!';
+                }
+                break;
+        }
+    });
+
+    socket.on('payment-update', data => {
+        currentCredit = data.credit;
+        updatePaymentBar();
+        
+        // Flash denom tag
+        const tag = document.querySelector(`.denom-tag[data-d="${data.device === 'bill_acceptor' ? 'bill' : data.amount}"]`);
+        if (tag) {
+            tag.classList.add('active');
+            setTimeout(() => tag.classList.remove('active'), 600);
+        }
+        
+        $('hwStatus').textContent = `Last: ${data.device} ₱${data.amount}`;
+    });
+
+    socket.on('dispense-change', data => {
+        changeCoins10 = Math.floor(data.amount / 10);
+        changeCoins1 = data.amount % 10;
+        animateHoppers();
+        $('payStatusMsg').className = 'status-msg msg-processing';
+        $('payStatusMsg').textContent = `🪙 Dispensing ₱${data.amount} change...`;
+    });
+
+    return socket;
+}
+
+// Bootstrap: connect socket when the page loads
+initSocket();
 
 // Render Routes
 function renderRoutes() {

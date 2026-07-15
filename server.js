@@ -1,3 +1,4 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const http = require('http');
@@ -6,7 +7,8 @@ const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
-const CLOUD_FLARE_TUNNEL_ORIGIN = 'https://concerned-homework-herald-eligibility.trycloudflare.com';
+// Read the Cloudflare tunnel URL from .env — update .env when the tunnel URL changes
+const CLOUD_FLARE_TUNNEL_ORIGIN = process.env.CLOUDFLARE_TUNNEL_URL || '';
 const allowedCorsOrigin = (origin, callback) => {
     if (!origin) return callback(null, true);
 
@@ -181,6 +183,13 @@ app.post('/api/hardware/status', (req, res) => {
 // ============================================================
 // FRONTEND API ENDPOINTS
 // ============================================================
+
+// Returns config values the frontend needs (e.g. tunnel URL for socket.io)
+app.get('/api/config', (req, res) => {
+    res.json({
+        tunnelUrl: CLOUD_FLARE_TUNNEL_ORIGIN || null
+    });
+});
 
 app.get('/api/routes', (req, res) => res.json(ROUTES));
 

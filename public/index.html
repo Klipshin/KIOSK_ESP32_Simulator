@@ -614,19 +614,10 @@ function showScreen(id) {
 }
 
 // ---- Socket Initialization ----
-// Fetches tunnel URL from the server (/api/config), so .env is the only file to update.
 async function initSocket() {
-    let tunnelUrl = window.location.origin; // fallback: same origin (works on localhost)
-    try {
-        const res = await fetch('/api/config');
-        const cfg = await res.json();
-        if (cfg.tunnelUrl) tunnelUrl = cfg.tunnelUrl;
-    } catch (e) {
-        console.warn('[Config] Could not fetch /api/config, falling back to same-origin:', e.message);
-    }
-
-    console.log('[WS] Connecting to:', tunnelUrl);
-    const socket = io(tunnelUrl, {
+    const socketUrl = window.location.origin;
+    console.log('[WS] Connecting to:', socketUrl);
+    const socket = io(socketUrl, {
         reconnection: true,
         reconnectionDelay: 1000,
         reconnectionAttempts: 10,

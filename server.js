@@ -4,6 +4,8 @@ const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
 const path = require('path');
+const { SerialPort } = require('serialport');
+const { ReadlineParser } = require('@serialport/parser-readline');
 
 const app = express();
 const server = http.createServer(app);
@@ -33,6 +35,62 @@ const io = new Server(server, {
 });
 
 const PORT = process.env.PORT || 3000;
+const SERIAL_PORT_PATH = process.env.SERIAL_PORT || 'COM6';
+const BAUD_RATE = parseInt(process.env.BAUD_RATE) || 115200;
+
+// ============================================================
+// ESP32 USB SERIAL BRIDGE
+// Reads EVT:{...} JSON lines from the ESP32 over USB.
+// Also writes SET_PRICE:<n> and RESET commands back to the ESP32.
+// ============================================================
+let esp32Port = null;
+
+try {
+    esp32Port = new SerialPort({ path: SERIAL_PORT_PATH, baudRate: BAUD_RATE, autoOpen: false });
+
+    esp32Port.open((err) => {
+        if (err) {
+            console.warn(`[Serial] Could not open ${SERIAL_PORT_PATH}: ${err.message}`);
+            console.warn('[Serial] Hardware events will only arrive via HTTP fallback endpoints.');
+            return;
+        }
+        console.log(`[Serial] Opened ${SERIAL_PORT_PATH} at ${BAUD_RATE} baud — ESP32 connected.`);
+    });
+
+    const parser = esp32Port.pipe(new ReadlineParser({ delimiter: '\n' }));
+
+    parser.on('data', (line) => {
+        line = line.trim();
+        if (!line.startsWith('EVT:')) return; // plain debug log lines — ignore
+        try {
+            const data = JSON.parse(line.substring(4)); // strip "EVT:" prefix
+            if (data.type === 'payment') {
+                handleHardwarePayment(data);
+            } else if (data.type === 'status') {
+                handleHardwareStatus(data);
+            }
+        } catch (e) {
+            console.warn(`[Serial] Could not parse event: ${line}`);
+        }
+    });
+
+    esp32Port.on('error', (err) => {
+        console.error(`[Serial] Port error: ${err.message}`);
+    });
+
+} catch (err) {
+    console.warn(`[Serial] SerialPort init failed: ${err.message}`);
+    console.warn('[Serial] Running without hardware — HTTP fallback only.');
+}
+
+// Send a command string to the ESP32 over serial (e.g. "SET_PRICE:150", "RESET")
+function sendToESP32(command) {
+    if (esp32Port && esp32Port.isOpen) {
+        esp32Port.write(command + '\n', (err) => {
+            if (err) console.error(`[Serial] Write error: ${err.message}`);
+        });
+    }
+}
 
 app.use(cors({
     origin: allowedCorsOrigin,
@@ -123,18 +181,14 @@ function generateReceipt(state) {
 }
 
 // ============================================================
-// HARDWARE ENDPOINTS (ESP32 → Server)
+// HARDWARE EVENT HANDLERS (shared by Serial and HTTP paths)
 // ============================================================
 
-app.post('/api/hardware/event', (req, res) => {
-    const { device, amount, credit, timestamp } = req.body;
-    
-    // Only accept money during active payment phase
+function handleHardwarePayment({ device, amount, credit, timestamp }) {
     if (kioskState.mode === 'BOOKING_PAYMENT') {
         kioskState.credit = credit || (kioskState.credit + amount);
         kioskState.lastHardwareEvent = { device, amount, timestamp };
-        
-        // Broadcast real-time update to frontend
+
         io.emit('payment-update', {
             device,
             amount,
@@ -143,40 +197,46 @@ app.post('/api/hardware/event', (req, res) => {
             timestamp
         });
 
-        // Auto-trigger completion when fully paid
         if (kioskState.credit >= kioskState.totalPrice) {
             finalizePayment();
         }
     } else {
         console.log(`[HW] Ignored ${device} ₱${amount} (Mode: ${kioskState.mode})`);
     }
-    
-    res.json({ status: "ok", mode: kioskState.mode, credit: kioskState.credit });
-});
+}
 
-app.post('/api/hardware/status', (req, res) => {
-    const { status, changeDue, timestamp } = req.body;
-    
+function handleHardwareStatus({ status, changeDue }) {
     kioskState.changeDue = changeDue || 0;
-    
+
     if (status === 'dispensing_change') {
-        io.emit('dispense-change', { 
+        io.emit('dispense-change', {
             amount: kioskState.changeDue,
             coins10: Math.floor(kioskState.changeDue / 10),
             coins1: kioskState.changeDue % 10
         });
     } else if (status === 'completed') {
-        // Hardware finished dispensing → issue receipt
         kioskState.receipt = generateReceipt(kioskState);
         kioskState.mode = 'TICKET_ISSUED';
         io.emit('state-update', kioskState);
-        
-        // Auto-reset after showing receipt
         setTimeout(() => resetKiosk(), 8000);
     } else if (status === 'insufficient_funds') {
         io.emit('status-message', { type: 'warning', text: 'Insufficient funds. Please add more payment.' });
     }
-    
+}
+
+// ============================================================
+// HARDWARE ENDPOINTS (HTTP fallback — ESP32 can still POST here)
+// ============================================================
+
+app.post('/api/hardware/event', (req, res) => {
+    const { device, amount, credit, timestamp } = req.body;
+    handleHardwarePayment({ device, amount, credit, timestamp });
+    res.json({ status: "ok", mode: kioskState.mode, credit: kioskState.credit });
+});
+
+app.post('/api/hardware/status', (req, res) => {
+    const { status, changeDue } = req.body;
+    handleHardwareStatus({ status, changeDue });
     res.json({ status: "ok" });
 });
 
@@ -213,6 +273,9 @@ app.post('/api/action/select-route', (req, res) => {
     kioskState.mode = 'BOOKING_PAYMENT';
     kioskState.credit = 0;
     kioskState.changeDue = 0;
+
+    // Tell the ESP32 the target price so it knows when to dispense change
+    sendToESP32(`SET_PRICE:${kioskState.totalPrice}`);
     
     io.emit('state-update', kioskState);
     res.json(kioskState);
@@ -271,6 +334,7 @@ function resetKiosk() {
         receipt: null,
         lastHardwareEvent: null
     };
+    sendToESP32('RESET'); // sync ESP32 state back to IDLE
 }
 
 // ============================================================

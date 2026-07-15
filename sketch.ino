@@ -1,5 +1,3 @@
-#include <WiFi.h>
-#include <HTTPClient.h>
 #include <ArduinoJson.h>
 
 // Forward Declarations for PlatformIO/C++ Compiler
@@ -17,17 +15,11 @@ void printStatus();
 void processSerialCommand(String command);
 
 // ------------------------------------------------------------
-// Network Configuration (UPDATE THESE FOR YOUR ACTUAL ENVIRONMENT)
+// Communication: USB Serial (EVT: JSON protocol)
+// The ESP32 sends events to the Node.js server via USB serial.
+// Prefix "EVT:" marks machine-readable JSON; other lines are human debug logs.
+// The server also writes commands back: SET_PRICE:<n>, RESET, STATUS
 // ------------------------------------------------------------
-const char *ssid = "OLTEK Corp";
-const char *password = "hayahAI2026";
-
-// Local server address — update only if your server machine's IP changes.
-// The ESP32 talks directly to the server over LAN; it does NOT need the
-// Cloudflare tunnel URL (that's only for browser access from outside).
-const char *SERVER_HOST = "http://192.168.1.134:3000"; // <-- set to your server PC's local IP
-const char *kioskApiUrl = "http://192.168.1.134:3000/api/hardware/event";
-const char *kioskStatusUrl = "http://192.168.1.134:3000/api/hardware/status";
 
 // ------------------------------------------------------------
 // Pin Configurations (Physical ESP32 Setup)
@@ -127,66 +119,34 @@ String getTimestamp()
   return String(timestamp);
 }
 
+// Emit a payment event to the server via USB serial.
 void sendPaymentToKiosk(String deviceType, int amount)
 {
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    HTTPClient http;
-    http.setTimeout(3000); // 3-second network timeout limit
-    http.begin(kioskApiUrl);
-    http.addHeader("Content-Type", "application/json");
+  JsonDocument doc;
+  doc["type"]      = "payment";
+  doc["device"]    = deviceType;
+  doc["amount"]    = amount;
+  doc["credit"]    = totalCredit;
+  doc["timestamp"] = getTimestamp();
 
-    JsonDocument doc;
-    doc["device"] = deviceType;
-    doc["amount"] = amount;
-    doc["credit"] = totalCredit;
-    doc["timestamp"] = getTimestamp();
-
-    String jsonPayload;
-    serializeJson(doc, jsonPayload);
-
-    int httpResponseCode = http.POST(jsonPayload);
-    if (httpResponseCode > 0)
-    {
-      Serial.printf("[API] Payment sent - Response Code: %d\n", httpResponseCode);
-    }
-    else
-    {
-      Serial.printf("[API] Send failed: %s\n", http.errorToString(httpResponseCode).c_str());
-    }
-    http.end();
-  }
+  Serial.print("EVT:");
+  serializeJson(doc, Serial);
+  Serial.println();
 }
 
+// Emit a status event to the server via USB serial.
 void sendStatusToKiosk(String status, int credit, int change)
 {
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    HTTPClient http;
-    http.setTimeout(3000);
-    http.begin(kioskStatusUrl);
-    http.addHeader("Content-Type", "application/json");
+  JsonDocument doc;
+  doc["type"]      = "status";
+  doc["status"]    = status;
+  doc["credit"]    = credit;
+  doc["changeDue"] = change;
+  doc["timestamp"] = getTimestamp();
 
-    JsonDocument doc;
-    doc["status"] = status;
-    doc["credit"] = credit;
-    doc["changeDue"] = change;
-    doc["timestamp"] = getTimestamp();
-
-    String jsonPayload;
-    serializeJson(doc, jsonPayload);
-
-    int httpResponseCode = http.POST(jsonPayload);
-    if (httpResponseCode > 0)
-    {
-      Serial.printf("[API] Status sent - Response Code: %d\n", httpResponseCode);
-    }
-    else
-    {
-      Serial.printf("[API] Status send failed: %s\n", http.errorToString(httpResponseCode).c_str());
-    }
-    http.end();
-  }
+  Serial.print("EVT:");
+  serializeJson(doc, Serial);
+  Serial.println();
 }
 
 void addCredit(int value, String source)
@@ -425,7 +385,7 @@ void printStatus()
   Serial.printf("Item Price: PHP %d\n", itemPrice);
   Serial.printf("Total Credit: PHP %d\n", totalCredit);
   Serial.printf("Change Due: PHP %d\n", changeDue);
-  Serial.printf("WiFi Status: %s\n", WiFi.status() == WL_CONNECTED ? "Connected" : "Disconnected");
+  Serial.println("Connection: USB Serial");
   Serial.println("======================\n");
 }
 
@@ -500,37 +460,9 @@ void setup()
   attachInterrupt(digitalPinToInterrupt(COIN_SLOT_PIN), coinISR, FALLING);
   attachInterrupt(digitalPinToInterrupt(BILL_ACC_PIN), billISR, FALLING);
 
-  // Network Initialization
-  Serial.printf("[WiFi] Establishing link to network: %s\n", ssid);
-  WiFi.begin(ssid, password);
-
-  int wifiAttempts = 0;
-  while (WiFi.status() != WL_CONNECTED && wifiAttempts < 30)
-  {
-    delay(1000);
-    Serial.print(".");
-    wifiAttempts++;
-  }
-
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    Serial.println("\n[WiFi] Connection Authenticated!");
-    Serial.printf("[WiFi] Local Station IP Address: %s\n", WiFi.localIP().toString().c_str());
-    digitalWrite(STATUS_LED_PIN, HIGH); // Solid light indicates active connection
-  }
-  else
-  {
-    Serial.println("\n[WiFi] Critical Error: Connection Time Out!");
-    // Blink error signal on hardware
-    for (int i = 0; i < 5; i++)
-    {
-      digitalWrite(STATUS_LED_PIN, HIGH);
-      delay(100);
-      digitalWrite(STATUS_LED_PIN, LOW);
-      delay(100);
-    }
-  }
-
+  // USB Serial bridge ready — server reads EVT: JSON lines on this port
+  digitalWrite(STATUS_LED_PIN, HIGH); // Solid on = ready
+  Serial.println("[BOOT] USB Serial bridge active. Streaming events to server.");
   Serial.println("[BOOT] Physical system initialization finished. Awaiting instructions.");
 }
 

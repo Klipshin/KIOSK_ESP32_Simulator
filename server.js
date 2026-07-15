@@ -6,12 +6,13 @@ const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
+const CLOUD_FLARE_TUNNEL_ORIGIN = 'https://concerned-homework-herald-eligibility.trycloudflare.com';
 const allowedCorsOrigin = (origin, callback) => {
     if (!origin) return callback(null, true);
 
     const localNetworkPattern = /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})(:\d+)?$/;
 
-    if (localNetworkPattern.test(origin) || origin === 'null') {
+    if (localNetworkPattern.test(origin) || origin === 'null' || origin === CLOUD_FLARE_TUNNEL_ORIGIN) {
         return callback(null, true);
     }
 

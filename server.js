@@ -63,7 +63,13 @@ const SERIAL_DEBUG = process.env.SERIAL_DEBUG === 'true';
 
     parser.on('data', (line) => {
         line = line.trim();
-        if (SERIAL_DEBUG) console.log(`[ESP32] ${line}`); // show all raw output in server terminal
+        if (SERIAL_DEBUG) {
+            // Strip any non-printable ASCII/control characters to prevent terminal corruption
+            const cleanLine = line.replace(/[^ -~]/g, '');
+            if (cleanLine.length > 0) {
+                console.log(`[ESP32] ${cleanLine}`);
+            }
+        }
         if (!line.startsWith('EVT:')) return; // plain debug log lines — ignore
         try {
             const data = JSON.parse(line.substring(4)); // strip "EVT:" prefix
@@ -199,10 +205,6 @@ function handleHardwarePayment({ device, amount, credit, timestamp }) {
             remaining: Math.max(0, kioskState.totalPrice - kioskState.credit),
             timestamp
         });
-
-        if (kioskState.credit >= kioskState.totalPrice) {
-            finalizePayment();
-        }
     } else {
         console.log(`[HW] Ignored ${device} ₱${amount} (Mode: ${kioskState.mode})`);
     }
@@ -224,6 +226,9 @@ function handleHardwareStatus({ status, changeDue }) {
         setTimeout(() => resetKiosk(), 8000);
     } else if (status === 'insufficient_funds') {
         io.emit('status-message', { type: 'warning', text: 'Insufficient funds. Please add more payment.' });
+    } else if (status === 'hardware_error_jam') {
+        io.emit('status-message', { type: 'error', text: 'Hardware Error: Hopper Jam detected! Please call assistance.' });
+        setTimeout(() => resetKiosk(), 8000);
     }
 }
 
@@ -298,6 +303,42 @@ app.post('/api/action/simulate-scan', (req, res) => {
     res.json({ success: true, ticket: kioskState.qrData });
 });
 
+app.post('/api/action/insert-cash', (req, res) => {
+    const { amount } = req.body;
+    if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
+
+    console.log(`[Simulator] Cash insertion requested: ₱${amount}`);
+    
+    // Update local state credit immediately so the UI updates instantly
+    kioskState.credit += amount;
+    io.emit('payment-update', {
+        device: amount >= 50 ? 'bill_acceptor' : 'coin_slot',
+        amount: amount,
+        credit: kioskState.credit,
+        remaining: Math.max(0, kioskState.totalPrice - kioskState.credit),
+        timestamp: new Date().toISOString()
+    });
+
+    if (esp32Port && esp32Port.isOpen) {
+        // Send command to ESP32 to keep its internal state in sync
+        sendToESP32(`ADD_CREDIT:${amount}`);
+    }
+    
+    res.json({ success: true, currentCredit: kioskState.credit });
+});
+
+app.post('/api/action/pay', (req, res) => {
+    if (kioskState.mode !== 'BOOKING_PAYMENT') {
+        return res.status(400).json({ error: 'Not in booking payment mode' });
+    }
+    if (kioskState.credit < kioskState.totalPrice) {
+        return res.status(400).json({ error: 'Insufficient credit' });
+    }
+    
+    finalizePayment();
+    res.json(kioskState);
+});
+
 app.post('/api/action/reset', (req, res) => {
     resetKiosk();
     io.emit('state-update', kioskState);
@@ -313,7 +354,13 @@ function finalizePayment() {
     kioskState.mode = 'DISPENSING_CHANGE';
     io.emit('state-update', kioskState);
     
-    // In real hardware, ESP32 would dispense then POST /api/hardware/status
+    // If the real ESP32 board is connected, command it to dispense change
+    if (esp32Port && esp32Port.isOpen) {
+        console.log(`[Payment] Real hardware connected. Sending DISPENSE:${kioskState.changeDue} to ESP32.`);
+        sendToESP32(`DISPENSE:${kioskState.changeDue}`);
+        return;
+    }
+
     // For simulation without hardware, auto-complete after delay:
     setTimeout(() => {
         if (kioskState.mode === 'DISPENSING_CHANGE') {

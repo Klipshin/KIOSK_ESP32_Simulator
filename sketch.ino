@@ -55,7 +55,7 @@ volatile unsigned long lastBillPulseTimeUs = 0;
 // Hardware Debounce constraints
 const unsigned long debounceTimeUs = 40000; // 40ms filter for hardware switch bouncing
 const unsigned long coinTimeout = 600;      // Wait 600ms after last pulse to aggregate coin value
-const unsigned long billTimeout = 500;      // Wait 500ms after last pulse to aggregate bill value
+const unsigned long billTimeout = 250;      // Wait 250ms after last pulse to aggregate bill value
 const unsigned long DISPENSE_TIMEOUT = 15000;
 
 // Transaction State Machine
@@ -94,10 +94,11 @@ void IRAM_ATTR coinISR()
 void IRAM_ATTR billISR()
 {
   unsigned long nowUs = micros();
-  if (nowUs - lastBillPulseTimeUs > 20000)
-  { // 20ms separation check for fast bill pulses
+
+  if (nowUs - lastBillPulseTimeUs > 50000)
+  { // 50ms
     billPulseCount++;
-    lastBillPulseTime = nowUs / 1000;
+    lastBillPulseTime = millis();
     lastBillPulseTimeUs = nowUs;
   }
 }
@@ -202,36 +203,9 @@ void decodeCoins(int pulses)
 
 void decodeBills(int pulses)
 {
-  int billValue = 0;
-  String billDesc = "";
-
-  if (pulses == 1)
-  {
-    billValue = 50;
-    billDesc = "₱50 bill";
-  }
-  else if (pulses == 2)
-  {
-    billValue = 100;
-    billDesc = "₱100 bill";
-  }
-  else if (pulses == 5)
-  {
-    billValue = 500;
-    billDesc = "₱500 bill";
-  }
-  else if (pulses == 10)
-  {
-    billValue = 1000;
-    billDesc = "₱1000 bill";
-  }
-  else
-  {
-    billValue = pulses * 10;
-    billDesc = String(pulses) + " pulses (₱" + String(billValue) + ")";
-  }
-
-  Serial.printf("\n[BILL DETECTED] %s inserted\n", billDesc.c_str());
+  // Linear mapping: 1 pulse = ₱10.  (₱20=2p, ₱50=5p, ₱100=10p, ₱500=50p, ₱1000=100p)
+  int billValue = pulses * 10;
+  Serial.printf("\n[BILL DETECTED] %d pulses → ₱%d bill inserted\n", pulses, billValue);
   addCredit(billValue, "bill_acceptor");
 }
 
@@ -713,12 +687,17 @@ void loop()
   {
     noInterrupts();
     int currentBillPulses = billPulseCount;
-    billPulseCount = 0;
+    billPulseCount = 0; // Always drain — prevents stale pulses bleeding into next transaction
     interrupts();
 
-    if (currentState == AWAITING_PAYMENT || currentState == IDLE)
+    // Only accept bills when actively awaiting payment AND credit hasn't reached the price yet
+    if (currentState == AWAITING_PAYMENT && totalCredit < itemPrice)
     {
       decodeBills(currentBillPulses);
+    }
+    else if (currentBillPulses > 0)
+    {
+      Serial.println("[BILL] Pulse ignored — acceptor inactive (not awaiting payment or price already met).");
     }
   }
 

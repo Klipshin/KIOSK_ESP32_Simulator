@@ -52,13 +52,14 @@ volatile unsigned long lastBillPulseTimeUs = 0;
 
 // Hardware Debounce constraints
 const unsigned long debounceTimeUs = 40000; // 40ms filter for hardware switch bouncing
-const unsigned long coinTimeout = 600;      // Wait 600ms after last pulse to aggregate coin value
-const unsigned long billTimeout = 500;      // Wait 500ms after last pulse to aggregate bill value
+const unsigned long coinTimeout = 1500;     // Wait 1500ms after last pulse — ₱20 coin = 20 pulses @ ~50ms
+const unsigned long billTimeout = 250;    // Wait 12s after last pulse — ₱1000 bill = 100 pulses @ ~100ms
 const unsigned long DISPENSE_TIMEOUT = 15000;
 
 // Transaction State Machine
 int totalCredit = 0;
 int itemPrice = 0;
+String serialBuffer = "";  // Non-blocking serial receive buffer
 enum TransactionState
 {
   IDLE,
@@ -88,18 +89,17 @@ void IRAM_ATTR coinISR()
   if (nowUs - lastCoinInterruptTimeUs > debounceTimeUs)
   {
     coinPulseCount++;
-    lastCoinPulseTime = nowUs / 1000;
+    lastCoinPulseTime = millis();  // Use millis() directly — safe on ESP32 (FreeRTOS)
     lastCoinInterruptTimeUs = nowUs;
   }
 }
 
-void IRAM_ATTR billISR()
-{
+void IRAM_ATTR billISR() {
   unsigned long nowUs = micros();
-  if (nowUs - lastBillPulseTimeUs > 20000)
-  { // 20ms separation check for fast bill pulses
+
+  if (nowUs - lastBillPulseTimeUs > 50000) { // 50ms
     billPulseCount++;
-    lastBillPulseTime = nowUs / 1000;
+    lastBillPulseTime = millis();
     lastBillPulseTimeUs = nowUs;
   }
 }
@@ -172,65 +172,17 @@ void addCredit(int value, String source)
 // ------------------------------------------------------------
 void decodeCoins(int pulses)
 {
-  // Matches typical configuration profiles: 1 pulse = ₱1, 5 pulses = ₱5, etc.
-  int remaining = pulses;
-  while (remaining > 0)
-  {
-    if (remaining >= 20)
-    {
-      addCredit(20, "coin_slot");
-      remaining -= 20;
-    }
-    else if (remaining >= 10)
-    {
-      addCredit(10, "coin_slot");
-      remaining -= 10;
-    }
-    else if (remaining >= 5)
-    {
-      addCredit(5, "coin_slot");
-      remaining -= 5;
-    }
-    else
-    {
-      addCredit(1, "coin_slot");
-      remaining -= 1;
-    }
-  }
+  // Linear mapping: 1 pulse = ₱1.  Total value = pulse count.
+  int coinValue = pulses;
+  Serial.printf("\n[COIN DETECTED] %d pulses → ₱%d coin inserted\n", pulses, coinValue);
+  addCredit(coinValue, "coin_slot");
 }
 
 void decodeBills(int pulses)
 {
-  int billValue = 0;
-  String billDesc = "";
-
-  if (pulses == 1)
-  {
-    billValue = 50;
-    billDesc = "₱50 bill";
-  }
-  else if (pulses == 2)
-  {
-    billValue = 100;
-    billDesc = "₱100 bill";
-  }
-  else if (pulses == 5)
-  {
-    billValue = 500;
-    billDesc = "₱500 bill";
-  }
-  else if (pulses == 10)
-  {
-    billValue = 1000;
-    billDesc = "₱1000 bill";
-  }
-  else
-  {
-    billValue = pulses * 10;
-    billDesc = String(pulses) + " pulses (₱" + String(billValue) + ")";
-  }
-
-  Serial.printf("\n[BILL DETECTED] %s inserted\n", billDesc.c_str());
+  // Linear mapping: 1 pulse = ₱10.  (₱20=2p, ₱50=5p, ₱100=10p, ₱500=50p, ₱1000=100p)
+  int billValue = pulses * 10;
+  Serial.printf("\n[BILL DETECTED] %d pulses → ₱%d bill inserted\n", pulses, billValue);
   addCredit(billValue, "bill_acceptor");
 }
 
@@ -472,10 +424,19 @@ void loop()
   static bool coinReceiving = false;
   static bool lastTestBtnState = HIGH;
 
-  if (Serial.available() > 0)
+  // Non-blocking serial read — avoids up to 1s hang from readStringUntil()
+  while (Serial.available() > 0)
   {
-    String command = Serial.readStringUntil('\n');
-    processSerialCommand(command);
+    char c = Serial.read();
+    if (c == '\n')
+    {
+      processSerialCommand(serialBuffer);
+      serialBuffer = "";
+    }
+    else if (c != '\r')
+    {
+      serialBuffer += c;
+    }
   }
 
   // --- MANUAL HARDWARE BUTTON SIMULATIONS ---

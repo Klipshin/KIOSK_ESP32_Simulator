@@ -313,16 +313,19 @@ function finalizePayment() {
     kioskState.mode = 'DISPENSING_CHANGE';
     io.emit('state-update', kioskState);
     
-    // In real hardware, ESP32 would dispense then POST /api/hardware/status
-    // For simulation without hardware, auto-complete after delay:
-    setTimeout(() => {
-        if (kioskState.mode === 'DISPENSING_CHANGE') {
-            kioskState.receipt = generateReceipt(kioskState);
-            kioskState.mode = 'TICKET_ISSUED';
-            io.emit('state-update', kioskState);
-            setTimeout(() => resetKiosk(), 8000);
-        }
-    }, 4000);
+    // Only auto-complete if no ESP32 hardware is connected.
+    // When hardware is present, the ESP32 will send a 'completed' status event
+    // after dispensing change — avoid duplicate receipt/reset.
+    if (!esp32Port || !esp32Port.isOpen) {
+        setTimeout(() => {
+            if (kioskState.mode === 'DISPENSING_CHANGE') {
+                kioskState.receipt = generateReceipt(kioskState);
+                kioskState.mode = 'TICKET_ISSUED';
+                io.emit('state-update', kioskState);
+                setTimeout(() => resetKiosk(), 8000);
+            }
+        }, 4000);
+    }
 }
 
 function resetKiosk() {

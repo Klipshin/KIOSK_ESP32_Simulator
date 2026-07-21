@@ -1,4 +1,4 @@
 .pio/build/esp32dev/FrameworkArduino/USBMSC.cpp.o: \
- C:/Users/cliff/.platformio/packages/framework-arduinoespressif32/cores/esp32/USBMSC.cpp \
- C:/Users/cliff/.platformio/packages/framework-arduinoespressif32/cores/esp32/USBMSC.h \
- C:/Users/cliff/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/dio_qspi/include/sdkconfig.h
+ C:/Users/Visitor/.platformio/packages/framework-arduinoespressif32/cores/esp32/USBMSC.cpp \
+ C:/Users/Visitor/.platformio/packages/framework-arduinoespressif32/cores/esp32/USBMSC.h \
+ C:/Users/Visitor/.platformio/packages/framework-arduinoespressif32/tools/sdk/esp32/dio_qspi/include/sdkconfig.h

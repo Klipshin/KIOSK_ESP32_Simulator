@@ -41,6 +41,20 @@ const byte HOPPER_10_SPEED = 220; // ~86% speed for 10 Peso Hopper (SSR-40)
 const byte TEST_DISPENSE_BTN = 26;
 const byte STATUS_LED_PIN = 2; // Onboard ESP32 Status LED
 
+// Bill Acceptor Inhibit Line
+// HIGH = acceptor inhibited (will not accept bills), LOW = acceptor enabled
+// Wire this pin to the bill acceptor's inhibit/enable input.
+// ⚠ Confirm polarity with your specific acceptor model.
+//   If your unit uses active-LOW inhibit, swap BILL_INHIBIT_ACTIVE and BILL_INHIBIT_IDLE.
+//
+// ⚠ GPIO 12 (MTDI) is a boot strapping pin on ESP32: driving it HIGH triggers a 1.8V
+//   flash voltage selection on the next reset, which can cause a boot loop when motors
+//   create voltage spikes that reset the chip mid-dispense. Use GPIO 22 instead.
+const byte BILL_INHIBIT_PIN    = 22;   // GPIO 22 – safe general-purpose output (no strapping)
+const byte BILL_INHIBIT_ACTIVE = HIGH; // HIGH = inhibit (reject bills)
+const byte BILL_INHIBIT_IDLE   = LOW;  // LOW  = allow (accept bills)
+const unsigned long BILL_LOCKOUT_MS = 5000UL; // Keep acceptor inhibited 5 s after last bill
+
 // ------------------------------------------------------------
 // Shared Volatile Variables (Interrupt Protected)
 // ------------------------------------------------------------
@@ -51,6 +65,14 @@ volatile unsigned long lastCoinInterruptTimeUs = 0;
 volatile int billPulseCount = 0;
 volatile unsigned long lastBillPulseTime = 0;
 volatile unsigned long lastBillPulseTimeUs = 0;
+
+// Bill acceptor inhibit state
+volatile bool billLockedOut    = false; // volatile: read inside ISR
+bool billReceiving             = false; // true from first pulse until billTimeout elapses
+unsigned long billInhibitStartTime = 0; // timestamp when lockout began
+
+// Non-blocking serial input buffer
+String inputBuffer = "";
 
 // Hardware Debounce constraints
 const unsigned long debounceTimeUs = 40000; // 40ms filter for hardware switch bouncing
@@ -93,12 +115,15 @@ void IRAM_ATTR coinISR()
 
 void IRAM_ATTR billISR()
 {
-  unsigned long nowUs = micros();
+  // Ignore all pulses while locked out — prevents stale/spurious pulses
+  // from the same note insertion bleeding into the next read window.
+  if (billLockedOut) return;
 
-  if (nowUs - lastBillPulseTimeUs > 50000)
-  { // 50ms
+  unsigned long nowUs = micros();
+  if (nowUs - lastBillPulseTimeUs > 50000) // 50 ms hardware debounce
+  {
     billPulseCount++;
-    lastBillPulseTime = millis();
+    lastBillPulseTime   = millis();
     lastBillPulseTimeUs = nowUs;
   }
 }
@@ -116,6 +141,33 @@ String getTimestamp()
   char timestamp[20];
   sprintf(timestamp, "%02lu:%02lu:%02lu", hours % 24, minutes % 60, seconds % 60);
   return String(timestamp);
+}
+
+// Controls the hardware inhibit line on the bill acceptor.
+// Pass true to inhibit (reject bills), false to allow (accept bills).
+void setBillInhibit(bool inhibit)
+{
+  digitalWrite(BILL_INHIBIT_PIN, inhibit ? BILL_INHIBIT_ACTIVE : BILL_INHIBIT_IDLE);
+  Serial.println(inhibit ? "[BILL] Validator inhibited." : "[BILL] Validator enabled.");
+}
+
+// Non-blocking serial command reader — accumulates characters until newline.
+// Replaces Serial.readStringUntil() which blocks the CPU for the serial timeout.
+void checkSerial()
+{
+  while (Serial.available() > 0)
+  {
+    char c = Serial.read();
+    if (c == '\n')
+    {
+      processSerialCommand(inputBuffer);
+      inputBuffer = "";
+    }
+    else if (c != '\r')
+    {
+      inputBuffer += c;
+    }
+  }
 }
 
 // Emit a payment event to the server via USB serial.
@@ -247,8 +299,13 @@ void calculateChange()
   dispenseChange();
 }
 
-void dispenseChange()
+void dispenseChange() // NOLINT — forward-declared at top
 {
+  // Inhibit the bill acceptor for the entire dispensing window.
+  // This prevents the customer from inserting another bill while coins are flying out,
+  // which could cause a credit race condition.
+  setBillInhibit(true);
+
   Serial.println("\n[DISPENSE] Commencing parallel change dispensing...");
 
   // --- Parallel Hopper State Machine ---
@@ -435,6 +492,14 @@ void dispenseChange()
 
   delay(2000);
   resetTransaction();
+
+  // Re-enable the bill acceptor only if the post-bill lockout has already expired.
+  // If we're still inside the lockout window, Phase C of the bill loop in loop()
+  // will re-enable it automatically when BILL_LOCKOUT_MS elapses.
+  if (!billLockedOut)
+  {
+    setBillInhibit(false);
+  }
 }
 
 bool dispenseCoins(String hopperType, byte relayPin, byte sensorPin, uint16_t targetCoins, byte motorSpeed)
@@ -625,6 +690,8 @@ void setup()
   delay(500);
   Serial.println("[BOOT] Initializing Hardware Layer...");
 
+  inputBuffer.reserve(64); // Pre-allocate serial buffer to reduce heap fragmentation
+
   // Setup input lines with internal pullup structures
   pinMode(COIN_SLOT_PIN, INPUT_PULLUP);
   pinMode(BILL_ACC_PIN, INPUT_PULLUP);
@@ -636,6 +703,8 @@ void setup()
   pinMode(STATUS_LED_PIN, OUTPUT);
   pinMode(HOPPER_10_RELAY_PIN, OUTPUT);
   pinMode(HOPPER_1_RELAY_PIN, OUTPUT);
+  pinMode(BILL_INHIBIT_PIN, OUTPUT);
+  setBillInhibit(false); // Start with acceptor enabled
 
   // Configure slow PWM frequency on ESP32 for the Fotek Solid State Relays (150Hz)
   analogWriteFrequency(150);
@@ -660,11 +729,8 @@ void loop()
   static bool coinReceiving = false;
   static bool lastTestBtnState = HIGH;
 
-  if (Serial.available() > 0)
-  {
-    String command = Serial.readStringUntil('\n');
-    processSerialCommand(command);
-  }
+  // Non-blocking serial command reader (replaces Serial.readStringUntil which blocks CPU)
+  checkSerial();
 
   // --- PULSE TRACKING ENGINE ---
   if (coinPulseCount > 0)
@@ -683,23 +749,57 @@ void loop()
     coinReceiving = false;
   }
 
-  if (billPulseCount > 0 && (currentMillis - lastBillPulseTime > billTimeout))
+  // ── BILL HANDLING (3-Phase Hardware-Inhibit Pattern) ────────────────────────
+  //
+  // Phase A – Rising edge: first pulse arrives → latch billReceiving and
+  //   immediately inhibit the acceptor in hardware so the note can't be
+  //   re-inserted while we're still counting pulses.
+  if (billPulseCount > 0 && !billReceiving && !billLockedOut)
+  {
+    billReceiving = true;
+    setBillInhibit(true);
+    Serial.println("[BILL] Pulse detected; validator inhibited until bill is decoded.");
+  }
+
+  // Phase B – Trailing-edge silence: after billTimeout ms of no new pulses,
+  //   atomically drain the count and decide whether to accept or discard.
+  if (billReceiving && (currentMillis - lastBillPulseTime > billTimeout))
   {
     noInterrupts();
     int currentBillPulses = billPulseCount;
     billPulseCount = 0; // Always drain — prevents stale pulses bleeding into next transaction
     interrupts();
 
-    // Only accept bills when actively awaiting payment AND credit hasn't reached the price yet
+    billReceiving = false;
+
+    // Gate: only credit if actively awaiting payment AND credit hasn't met the price yet.
+    // This is the software equivalent of the hardware inhibit — belt-and-suspenders.
     if (currentState == AWAITING_PAYMENT && totalCredit < itemPrice)
     {
       decodeBills(currentBillPulses);
     }
     else if (currentBillPulses > 0)
     {
-      Serial.println("[BILL] Pulse ignored — acceptor inactive (not awaiting payment or price already met).");
+      Serial.println("[BILL] Pulse discarded — not awaiting payment, or credit already meets price.");
     }
+
+    // Start the lockout window so no stale pulses from the same insertion
+    // can bleed into the next read (ISR also gated via billLockedOut flag).
+    billLockedOut        = true;
+    billInhibitStartTime = currentMillis;
+    Serial.printf("[BILL] Lockout started (%lu ms).\n", BILL_LOCKOUT_MS);
   }
+
+  // Phase C – Lockout expiry: after BILL_LOCKOUT_MS, flush any residual
+  //   ISR pulses, clear the lockout flag, and re-enable the acceptor.
+  if (billLockedOut && (currentMillis - billInhibitStartTime >= BILL_LOCKOUT_MS))
+  {
+    noInterrupts(); billPulseCount = 0; interrupts();
+    billLockedOut = false;
+    setBillInhibit(false);
+    Serial.println("[BILL] Lockout expired.");
+  }
+  // ────────────────────────────────────────────────────────────────────────────
 
   // Manual Test Cycle Engine
   bool testBtnState = digitalRead(TEST_DISPENSE_BTN);

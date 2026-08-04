@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Port Kiosk Tester</title>
+    <title>Ayahay Port Kiosk</title>
     <script src="/socket.io/socket.io.js"></script>
     <style>
         :root {
@@ -26,38 +26,6 @@
             color: var(--light);
             min-height: 100vh;
             overflow-x: hidden;
-        }
-
-        /* Background Video Styles */
-        .bg-video {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100vw;
-            height: 100vh;
-            object-fit: cover;
-            z-index: -2;
-            opacity: 0;
-            transition: opacity 1.5s ease-in-out;
-        }
-
-        .bg-video.loaded {
-            opacity: 1;
-        }
-
-        .bg-video-fallback {
-            position: absolute;
-            inset: 0;
-            background: linear-gradient(135deg, #050d1a 0%, #0a192f 100%);
-            z-index: -1;
-        }
-
-        .video-overlay {
-            position: fixed;
-            inset: 0;
-            background: rgba(5, 13, 26, 0.65); /* Darkens video for text contrast */
-            z-index: -1;
-            pointer-events: none;
         }
 
         .kiosk-container {
@@ -116,7 +84,7 @@
         }
 
         .mode-card {
-            background: rgba(10, 25, 47, 0.75); /* Slightly more opaque than before */
+            background: rgba(10, 25, 47, 0.75);
             border: 2px solid rgba(255,255,255,0.1);
             border-radius: 20px;
             padding: 50px 30px;
@@ -124,7 +92,6 @@
             cursor: pointer;
             transition: all 0.3s ease;
             backdrop-filter: blur(12px);
-            border: 1px solid rgba(255, 255, 255, 0.15);
         }
 
         .mode-card:hover {
@@ -306,21 +273,31 @@
         .hopper-label { font-size: 0.9em; color: rgba(255,255,255,0.5); margin-bottom: 5px; }
         .hopper-value { font-size: 2.5em; font-weight: 800; color: var(--accent); }
 
-        /* Receipt */
-        .receipt-container {
+        /* Digital Ticket / Success View */
+        .ticket-container {
             background: #fff;
             color: #0a192f;
             border-radius: 12px;
             padding: 25px;
             margin-top: 25px;
-            font-family: 'Courier New', Courier, monospace;
-            font-size: 0.82em;
-            line-height: 1.5;
-            white-space: pre-wrap;
+            text-align: center;
             box-shadow: 0 10px 40px rgba(0,0,0,0.3);
             max-width: 380px;
             margin-left: auto;
             margin-right: auto;
+        }
+
+        .qr-placeholder-large {
+            width: 150px;
+            height: 150px;
+            background: #f0f0f0;
+            margin: 15px auto;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 3em;
+            color: #ccc;
         }
 
         /* Buttons */
@@ -448,48 +425,29 @@
 <body>
 <div class="kiosk-container">
     <header>
-        <h1>⚓ PORT KIOSK TESTER</h1>
+        <h1>⚓ AYAHAY PORT KIOSK</h1>
         <div class="status-bar">
             <div class="status-badge">Server: <span id="connStatus" class="status-offline">● Offline</span></div>
             <div class="status-badge">Mode: <span id="modeLabel">IDLE</span></div>
-            <div class="status-badge">ESP32: <span id="hwStatus">Waiting...</span></div>
+            <div class="status-badge">Hardware: <span id="hwStatus">Waiting...</span></div>
         </div>
     </header>
 
-   <!-- SCREEN 1: Mode Selection with Background Video -->
-<div id="screenMode" class="screen">
-    <!-- Drone Shot Background Video (temporarily disabled)
-    <video 
-        id="bgVideo" 
-        autoplay 
-        muted 
-        loop 
-        playsinline
-        preload="auto"
-        class="bg-video"
-    >
-        <source src="/ship.mp4" type="video/mp4">
-        <div class="bg-video-fallback"></div>
-    </video>
-    -->
-    
-    <!-- Dark Overlay for Text Readability -->
-    <div class="video-overlay"></div>
-
-    <!-- Mode Selection Cards (Now Above Video) -->
-    <div class="mode-selection">
-        <div class="mode-card" onclick="selectMode('BOOK')">
-            <span class="mode-icon">🎫</span>
-            <div class="mode-title">Book Ticket</div>
-            <div class="mode-desc">Select your route, choose passengers,<br>and pay with coins or bills</div>
-        </div>
-        <div class="mode-card" onclick="selectMode('ONBOARD')">
-            <span class="mode-icon">📱</span>
-            <div class="mode-title">Scan QR / Onboard</div>
-            <div class="mode-desc">Already have a ticket?<br>Scan your QR code to board</div>
+    <!-- SCREEN 1: Mode Selection -->
+    <div id="screenMode" class="screen">
+        <div class="mode-selection">
+            <div class="mode-card" onclick="selectMode('BOOK')">
+                <span class="mode-icon">🎫</span>
+                <div class="mode-title">Book Ticket</div>
+                <div class="mode-desc">Select your route, choose passengers,<br>and pay with cash</div>
+            </div>
+            <div class="mode-card" onclick="selectMode('ONBOARD')">
+                <span class="mode-icon">📱</span>
+                <div class="mode-title">Scan QR / Onboard</div>
+                <div class="mode-desc">Already have a ticket?<br>Scan your QR code to board</div>
+            </div>
         </div>
     </div>
-</div>
 
     <!-- SCREEN 2: Route Selection -->
     <div id="screenRoutes" class="screen hidden">
@@ -536,25 +494,10 @@
             </div>
 
             <div class="coin-denoms" id="denomTags">
-                <div class="denom-tag" data-d="bill">💵 Bills (50/100/500/1000)</div>
-                <div class="denom-tag" data-d="20"> ₱20</div>
-                <div class="denom-tag" data-d="10">🪙 ₱10</div>
+                <div class="denom-tag" data-d="bill">💵 Bills</div>
+                <div class="denom-tag" data-d="10"> ₱10</div>
                 <div class="denom-tag" data-d="5">🪙 ₱5</div>
                 <div class="denom-tag" data-d="1">🪙 ₱1</div>
-            </div>
-
-            <div style="font-size:0.85em;color:rgba(255,255,255,0.4);margin:10px 0 5px;text-align:center;">
-                Simulate Cash Insertion (Testing)
-            </div>
-            <div style="display:flex;justify-content:center;gap:8px;margin-bottom:20px;flex-wrap:wrap;">
-                <button class="btn btn-outline" style="min-width:60px;padding:6px 8px;font-size:0.8em;margin:0;" onclick="insertSimulatedCash(1)">+ ₱1</button>
-                <button class="btn btn-outline" style="min-width:60px;padding:6px 8px;font-size:0.8em;margin:0;" onclick="insertSimulatedCash(5)">+ ₱5</button>
-                <button class="btn btn-outline" style="min-width:60px;padding:6px 8px;font-size:0.8em;margin:0;" onclick="insertSimulatedCash(10)">+ ₱10</button>
-                <button class="btn btn-outline" style="min-width:60px;padding:6px 8px;font-size:0.8em;margin:0;" onclick="insertSimulatedCash(20)">+ ₱20</button>
-                <button class="btn btn-outline" style="min-width:60px;padding:6px 8px;font-size:0.8em;margin:0;" onclick="insertSimulatedCash(50)">+ ₱50</button>
-                <button class="btn btn-outline" style="min-width:60px;padding:6px 8px;font-size:0.8em;margin:0;" onclick="insertSimulatedCash(100)">+ ₱100</button>
-                <button class="btn btn-outline" style="min-width:60px;padding:6px 8px;font-size:0.8em;margin:0;" onclick="insertSimulatedCash(500)">+ ₱500</button>
-                <button class="btn btn-outline" style="min-width:60px;padding:6px 8px;font-size:0.8em;margin:0;" onclick="insertSimulatedCash(1000)">+ ₱1000</button>
             </div>
 
             <div id="payStatusMsg" class="status-msg msg-waiting">
@@ -578,7 +521,8 @@
         <div class="btn-row">
             <button class="btn btn-outline" onclick="resetTransaction()">Cancel Transaction</button>
             <button class="btn" id="payBtn" disabled onclick="executePay()" style="background: linear-gradient(135deg, var(--success), #27ae60); color: white; font-weight: bold; transition: all 0.3s ease;">💳 Confirm & Pay</button>
-            <button class="btn btn-primary" id="simPayBtn" onclick="simulatePayment()">▶ Simulate Full Payment</button>
+            <!-- Simulation button kept for dev/debug only -->
+            <button class="btn btn-primary" id="simPayBtn" onclick="simulatePayment()" style="opacity:0.5; font-size:0.8em;">▶ Simulate</button>
         </div>
     </div>
 
@@ -598,17 +542,22 @@
         </div>
     </div>
 
-    <!-- SCREEN 5: Receipt / Success -->
+    <!-- SCREEN 5: Success / Digital Ticket -->
     <div id="screenReceipt" class="screen hidden">
-        <div class="status-msg msg-success" id="receiptTitle">✅ Ticket Issued Successfully!</div>
-        <div class="receipt-container" id="receiptText"></div>
+        <div class="status-msg msg-success" id="receiptTitle">✅ Booking Confirmed!</div>
+        
+        <div class="ticket-container">
+            <div style="font-size:1.2em;font-weight:bold;margin-bottom:10px;">YOUR DIGITAL TICKET</div>
+            <div class="qr-placeholder-large" id="digitalQr">🎫</div>
+            <div style="font-size:0.9em;color:#666;margin-top:10px;" id="bookingRef">REF: ---</div>
+            <div style="font-size:0.8em;color:#999;margin-top:5px;">Present this QR code at boarding</div>
+        </div>
+
         <div class="btn-row" style="max-width:380px;margin:25px auto 0;">
-            <button class="btn btn-primary" onclick="printReceipt()">🖨️ Print Receipt</button>
             <button class="btn btn-outline" onclick="resetTransaction()">New Transaction</button>
         </div>
     </div>
 </div>
-
 
 <script>
 // ---- Shared App State ----
@@ -634,14 +583,13 @@ function showScreen(id) {
 async function initSocket() {
     const socketUrl = window.location.origin;
     console.log('[WS] Connecting to:', socketUrl);
+    
+    // Removed ngrok skip header - using direct LAN connection
     const socket = io(socketUrl, {
         reconnection: true,
         reconnectionDelay: 1000,
         reconnectionAttempts: 10,
-        transports: ['websocket', 'polling'],
-        extraHeaders: {
-            'ngrok-skip-browser-warning': 'true' // Bypasses ngrok/cloudflare interstitial
-        }
+        transports: ['websocket', 'polling']
     });
 
     // Socket Events
@@ -656,21 +604,11 @@ async function initSocket() {
         console.log(`[WS] ❌ Disconnected. Reason: ${reason}`);
         $('connStatus').textContent = '● Offline';
         $('connStatus').className = 'status-offline';
-        
-        // Log specific disconnect reasons for debugging
-        if (reason === 'io server disconnect') {
-            console.log('[WS] Server forced disconnect - check server.js Socket.IO config');
-        } else if (reason === 'transport close') {
-            console.log('[WS] Transport closed - likely network issue or page unload');
-        }
     });
 
     socket.on('connect_error', (err) => {
         console.error('[WS] Connection error:', err.message);
         reconnectCount++;
-        if (reconnectCount > 5) {
-            console.warn('[WS] Too many reconnect attempts. Check if server is running.');
-        }
     });
 
     socket.on('routes-data', data => {
@@ -697,12 +635,14 @@ async function initSocket() {
                 break;
             case 'TICKET_ISSUED':
                 showScreen('screenReceipt');
-                if (state.receipt) {
-                    $('receiptText').textContent = state.receipt.text;
-                    $('receiptTitle').textContent = state.qrData 
-                        ? '✅ Boarding Verified! Welcome Aboard!' 
-                        : '✅ Ticket Issued Successfully!';
+                // Display digital ticket info from V2 API response
+                if (state.bookingId) {
+                    $('bookingRef').textContent = `REF: ${state.bookingId}`;
+                    $('digitalQr').textContent = '📱'; // Placeholder for actual QR rendering
                 }
+                $('receiptTitle').textContent = state.qrData 
+                    ? '✅ Boarding Verified! Welcome Aboard!' 
+                    : '✅ Booking Confirmed!';
                 break;
         }
     });
@@ -830,7 +770,7 @@ function updatePaymentBar() {
     const pct = Math.min(100, (currentCredit / currentTotal) * 100);
     $('payProgress').style.width = `${pct}%`;
     $('progressPct').textContent = `${Math.round(pct)}%`;
-    $('paidAmt').textContent = `₱${currentCredit.toLocaleString()}`;
+    $('paidAmt').textContent = `${currentCredit.toLocaleString()}`;
     $('remainAmt').textContent = `₱${Math.max(0, currentTotal - currentCredit).toLocaleString()}`;
     
     // Enable or disable the PAY button
@@ -901,18 +841,7 @@ async function insertSimulatedCash(amount) {
     }
 }
 
-function printReceipt() {
-    const content = $('receiptText').textContent;
-    const w = window.open('', '_blank', 'width=400,height=600');
-    w.document.write(`<html><head><title>Receipt</title>
-        <style>body{font-family:'Courier New',monospace;padding:20px;max-width:300px;margin:auto}
-        pre{white-space:pre-wrap;font-size:11px;line-height:1.4}</style></head>
-        <body><pre>${content}</pre></body></html>`);
-    w.document.close();
-    w.print();
-}
-
-// Background video temporarily disabled.
+// printReceipt() function removed - receipts now handled by V2 API / Marketplace
 </script>
 </body>
 </html>

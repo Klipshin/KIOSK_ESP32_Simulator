@@ -6,407 +6,361 @@ const { Server } = require('socket.io');
 const path = require('path');
 const { SerialPort } = require('serialport');
 const { ReadlineParser } = require('@serialport/parser-readline');
+const axios = require('axios');
 
-const app = express();
-const server = http.createServer(app);
-// Read the Cloudflare tunnel URL from .env — update .env when the tunnel URL changes
-const CLOUD_FLARE_TUNNEL_ORIGIN = process.env.CLOUDFLARE_TUNNEL_URL || '';
-const allowedCorsOrigin = (origin, callback) => {
-    if (!origin) return callback(null, true);
-
-    const localNetworkPattern = /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})(:\d+)?$/;
-
-    if (localNetworkPattern.test(origin) || origin === 'null' || origin === CLOUD_FLARE_TUNNEL_ORIGIN) {
-        return callback(null, true);
-    }
-
-    return callback(new Error(`CORS blocked for origin: ${origin}`), false);
-};
-const io = new Server(server, { 
-    cors: { 
-        origin: allowedCorsOrigin,
-        methods: ["GET", "POST"],
-        allowedHeaders: ["Content-Type", "Authorization", "ngrok-skip-browser-warning"],
-        credentials: true
-    },
-    pingTimeout: 60000,
-    pingInterval: 25000,
-    transports: ['websocket', 'polling']
-});
-
+// ============================================================
+// CONFIGURATION & API CLIENT
+// ============================================================
 const PORT = process.env.PORT || 3000;
 const SERIAL_PORT_PATH = process.env.SERIAL_PORT || 'COM6';
 const BAUD_RATE = parseInt(process.env.BAUD_RATE) || 115200;
 
-// ============================================================
-// ESP32 USB SERIAL BRIDGE
-// Reads EVT:{...} JSON lines from the ESP32 over USB.
-// Also writes SET_PRICE:<n> and RESET commands back to the ESP32.
-// ============================================================
-let esp32Port = null;
+const V2_API_BASE = process.env.V2_API_URL || 'http://localhost:4000/api/v2';
+const KIOSK_SERVICE_KEY = process.env.KIOSK_SERVICE_KEY || '';
+const TERMINAL_ID = process.env.TERMINAL_ID || 'TERM-DEV-001';
+const SHIPPING_LINE_FILTER = process.env.SHIPPING_LINE_FILTER || null;
 
-try {
-    esp32Port = new SerialPort({ path: SERIAL_PORT_PATH, baudRate: BAUD_RATE, autoOpen: false });
+const apiClient = axios.create({
+  baseURL: V2_API_BASE,
+  headers: {
+    'X-Terminal-Key': KIOSK_SERVICE_KEY,
+    'X-Terminal-Id': TERMINAL_ID,
+    'Content-Type': 'application/json'
+  },
+  timeout: 10000
+});
 
-    esp32Port.open((err) => {
-        if (err) {
-            console.warn(`[Serial] Could not open ${SERIAL_PORT_PATH}: ${err.message}`);
-            console.warn('[Serial] Hardware events will only arrive via HTTP fallback endpoints.');
-            return;
-        }
-        console.log(`[Serial] Opened ${SERIAL_PORT_PATH} at ${BAUD_RATE} baud — ESP32 connected.`);
+// Add this after apiClient creation
+const MOCK_MODE = process.env.MOCK_MODE === 'true';
+
+// Override startKioskSession to use mock data when V2 is unavailable
+async function startKioskSession() {
+  if (MOCK_MODE || !V2_API_BASE) {
+    console.warn('[V2] Running in MOCK MODE — using local fallback routes');
+    tenantRoutes = [
+      { id: 'R1', from: 'Manila', to: 'Cebu', price: 1250, duration: '22h' },
+      { id: 'R2', from: 'Cebu', to: 'Tagbilaran', price: 450, duration: '2h' }
+    ];
+    currentSessionId = `mock-session-${Date.now()}`;
+    io.emit('routes-data', tenantRoutes);
+    return;
+  }
+
+  try {
+    const res = await apiClient.post('/kiosk/sessions', {
+      terminalId: TERMINAL_ID,
+      shippingLineFilter: SHIPPING_LINE_FILTER
     });
-
-    const parser = esp32Port.pipe(new ReadlineParser({ delimiter: '\n' }));
-
-const SERIAL_DEBUG = process.env.SERIAL_DEBUG === 'true';
-
-    parser.on('data', (line) => {
-        line = line.trim();
-        if (SERIAL_DEBUG) {
-            // Strip any non-printable ASCII/control characters to prevent terminal corruption
-            const cleanLine = line.replace(/[^ -~]/g, '');
-            if (cleanLine.length > 0) {
-                console.log(`[ESP32] ${cleanLine}`);
-            }
-        }
-        if (!line.startsWith('EVT:')) return; // plain debug log lines — ignore
-        try {
-            const data = JSON.parse(line.substring(4)); // strip "EVT:" prefix
-            if (data.type === 'payment') {
-                handleHardwarePayment(data);
-            } else if (data.type === 'status') {
-                handleHardwareStatus(data);
-            }
-        } catch (e) {
-            console.warn(`[Serial] Could not parse event: ${line}`);
-        }
+    currentSessionId = res.data.sessionId;
+    tenantRoutes = res.data.routes;
+    io.emit('routes-data', tenantRoutes);
+    console.log(`[V2] Session started: ${currentSessionId}, ${tenantRoutes.length} routes loaded`);
+  } catch (err) {
+    console.error('[V2] Failed to start session:', err.response?.data || err.message);
+    io.emit('status-message', { 
+      type: 'error', 
+      text: 'Cannot connect to booking server. Please contact staff.' 
     });
-
-    esp32Port.on('error', (err) => {
-        console.error(`[Serial] Port error: ${err.message}`);
-    });
-
-} catch (err) {
-    console.warn(`[Serial] SerialPort init failed: ${err.message}`);
-    console.warn('[Serial] Running without hardware — HTTP fallback only.');
+  }
 }
 
-// Send a command string to the ESP32 over serial (e.g. "SET_PRICE:150", "RESET")
-function sendToESP32(command) {
-    if (esp32Port && esp32Port.isOpen) {
-        esp32Port.write(command + '\n', (err) => {
-            if (err) console.error(`[Serial] Write error: ${err.message}`);
-        });
-    }
-}
+// ============================================================
+// EXPRESS & SOCKET.IO SETUP
+// ============================================================
+const app = express();
+const server = http.createServer(app);
 
-app.use(cors({
+const allowedCorsOrigin = (origin, callback) => {
+  if (!origin) return callback(null, true);
+  const localNetworkPattern = /^https?:\/\/(localhost|127\.0\.0\.1|0\.0\.0\.0|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})(:\d+)?$/;
+  
+  if (localNetworkPattern.test(origin) || origin === 'null') {
+    return callback(null, true);
+  }
+  return callback(new Error(`CORS blocked for origin: ${origin}`), false);
+};
+
+const io = new Server(server, { 
+  cors: { 
     origin: allowedCorsOrigin,
     methods: ["GET", "POST"],
-    allowedHeaders: ["Content-Type", "Authorization", "ngrok-skip-browser-warning"],
+    allowedHeaders: ["Content-Type", "Authorization"],
     credentials: true
-}));
+  },
+  pingTimeout: 60000,
+  pingInterval: 25000,
+  transports: ['websocket', 'polling']
+});
+
+app.use(cors({ origin: allowedCorsOrigin, credentials: true }));
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ============================================================
-// MARITIME ROUTE CATALOG
+// ESP32 USB SERIAL BRIDGE
 // ============================================================
-const ROUTES = [
-    { id: 'R1', from: 'Manila', to: 'Cebu', price: 1250, duration: '22h' },
-    { id: 'R2', from: 'Manila', to: 'Iloilo', price: 980, duration: '16h' },
-    { id: 'R3', from: 'Cebu', to: 'Tagbilaran', price: 450, duration: '2h' },
-    { id: 'R4', from: 'Batangas', to: 'Mindoro', price: 320, duration: '3h' },
-    { id: 'R5', from: 'Dumaguete', to: 'Siquijor', price: 280, duration: '1.5h' }
-];
+let esp32Port = null;
+try {
+  esp32Port = new SerialPort({ path: SERIAL_PORT_PATH, baudRate: BAUD_RATE, autoOpen: false });
+  esp32Port.open((err) => {
+    if (err) {
+      console.warn(`[Serial] Could not open ${SERIAL_PORT_PATH}: ${err.message}`);
+      console.warn('[Serial] Hardware events will only arrive via HTTP fallback endpoints.');
+      return;
+    }
+    console.log(`[Serial] Opened ${SERIAL_PORT_PATH} at ${BAUD_RATE} baud — ESP32 connected.`);
+  });
+
+  const parser = esp32Port.pipe(new ReadlineParser({ delimiter: '\n' }));
+  const SERIAL_DEBUG = process.env.SERIAL_DEBUG === 'true';
+
+  parser.on('data', (line) => {
+    line = line.trim();
+    if (SERIAL_DEBUG) {
+      const cleanLine = line.replace(/[^ -~]/g, '');
+      if (cleanLine.length > 0) console.log(`[ESP32] ${cleanLine}`);
+    }
+    if (!line.startsWith('EVT:')) return;
+    try {
+      const data = JSON.parse(line.substring(4));
+      if (data.type === 'payment') handleHardwarePayment(data);
+      else if (data.type === 'status') handleHardwareStatus(data);
+    } catch (e) {
+      console.warn(`[Serial] Could not parse event: ${line}`);
+    }
+  });
+
+  esp32Port.on('error', (err) => console.error(`[Serial] Port error: ${err.message}`));
+} catch (err) {
+  console.warn(`[Serial] SerialPort init failed: ${err.message}`);
+  console.warn('[Serial] Running without hardware — HTTP fallback only.');
+}
+
+function sendToESP32(command) {
+  if (esp32Port && esp32Port.isOpen) {
+    esp32Port.write(command + '\n', (err) => {
+      if (err) console.error(`[Serial] Write error: ${err.message}`);
+    });
+  }
+}
 
 // ============================================================
 // GLOBAL KIOSK STATE
 // ============================================================
 let kioskState = {
-    mode: 'IDLE',              // IDLE | BOOKING_ROUTE | BOOKING_PAYMENT | ONBOARD_SCAN | TICKET_ISSUED
-    selectedRoute: null,
-    passengerCount: 1,
-    totalPrice: 0,
-    credit: 0,
-    changeDue: 0,
-    qrData: null,
-    receipt: null,
-    lastHardwareEvent: null
+  mode: 'IDLE',
+  selectedRoute: null,
+  passengerCount: 1,
+  totalPrice: 0,
+  credit: 0,
+  changeDue: 0,
+  qrData: null,
+  receipt: null,
+  lastHardwareEvent: null
 };
 
-// ============================================================
-// RECEIPT GENERATOR (Thermal Printer Format)
-// ============================================================
-function generateReceipt(state) {
-    const now = new Date();
-    const dateStr = now.toLocaleDateString('en-PH', { year: 'numeric', month: 'short', day: 'numeric' });
-    const timeStr = now.toLocaleTimeString('en-PH', { hour12: true });
-    const ticketNo = `PKT-${Date.now().toString(36).toUpperCase()}`;
-    
-    const coins10 = Math.floor(state.changeDue / 10);
-    const coins1 = state.changeDue % 10;
-
-    const lines = [
-        "================================",
-        "     PORT KIOSK TESTER          ",
-        "      OFFICIAL RECEIPT          ",
-        "================================",
-        ` Ticket #: ${ticketNo}`,
-        ` Date: ${dateStr}`,
-        ` Time: ${timeStr}`,
-        "--------------------------------",
-        " ROUTE DETAILS                  ",
-        ` From: ${state.selectedRoute.from}`,
-        ` To:   ${state.selectedRoute.to}`,
-        ` Duration: ${state.selectedRoute.duration}`,
-        "--------------------------------",
-        ` PASSENGERS: ${state.passengerCount}`,
-        ` UNIT PRICE: ₱${state.selectedRoute.price.toLocaleString()}`,
-        "--------------------------------",
-        ` TOTAL AMOUNT: ₱${state.totalPrice.toLocaleString()}`,
-        ` CASH TENDERED: ₱${state.credit.toLocaleString()}`,
-        ` CHANGE GIVEN: ₱${state.changeDue.toLocaleString()}`,
-        "--------------------------------",
-        " CHANGE BREAKDOWN               ",
-        `   ₱10 coins: ${coins10}`,
-        `   ₱1 coins:  ${coins1}`,
-        "================================",
-        " PLEASE KEEP THIS RECEIPT       ",
-        " FOR BOARDING VERIFICATION      ",
-        "                                ",
-        " THANK YOU FOR TRAVELING WITH   ",
-        "            US!                 ",
-        "================================"
-    ];
-
-    return {
-        text: lines.join('\n'),
-        ticketNo,
-        qrData: `BOARD:${ticketNo}:${state.selectedRoute.id}:${state.passengerCount}`,
-        printable: true
-    };
-}
+let currentSessionId = null;
+let tenantRoutes = [];
 
 // ============================================================
-// HARDWARE EVENT HANDLERS (shared by Serial and HTTP paths)
+// V2 API INTEGRATION
 // ============================================================
 
+
+// Start session on boot and refresh every 5 minutes
+startKioskSession();
+setInterval(startKioskSession, 300000);
+
+// ============================================================
+// HARDWARE EVENT HANDLERS
+// ============================================================
 function handleHardwarePayment({ device, amount, credit, timestamp }) {
-    if (kioskState.mode === 'BOOKING_PAYMENT') {
-        kioskState.credit = credit || (kioskState.credit + amount);
-        kioskState.lastHardwareEvent = { device, amount, timestamp };
+  if (kioskState.mode === 'BOOKING_PAYMENT') {
+    kioskState.credit = credit || (kioskState.credit + amount);
+    kioskState.lastHardwareEvent = { device, amount, timestamp };
 
-        io.emit('payment-update', {
-            device,
-            amount,
-            credit: kioskState.credit,
-            remaining: Math.max(0, kioskState.totalPrice - kioskState.credit),
-            timestamp
-        });
-    } else {
-        console.log(`[HW] Ignored ${device} ₱${amount} (Mode: ${kioskState.mode})`);
-    }
+    // Sync payment progress with V2 API
+    apiClient.patch(`/kiosk/bookings/${currentSessionId}/payment-progress`, {
+      sessionId: currentSessionId,
+      amountInserted: kioskState.credit,
+      totalDue: kioskState.totalPrice,
+      idempotencyKey: `PAY-${Date.now()}-${kioskState.credit}`
+    }).catch(err => console.warn('[V2] Payment sync failed:', err.message));
+
+    io.emit('payment-update', {
+      device, amount, credit: kioskState.credit,
+      remaining: Math.max(0, kioskState.totalPrice - kioskState.credit),
+      timestamp
+    });
+  } else {
+    console.log(`[HW] Ignored ${device} ₱${amount} (Mode: ${kioskState.mode})`);
+  }
 }
 
 function handleHardwareStatus({ status, changeDue }) {
-    kioskState.changeDue = changeDue || 0;
+  kioskState.changeDue = changeDue || 0;
 
-    if (status === 'dispensing_change') {
-        io.emit('dispense-change', {
-            amount: kioskState.changeDue,
-            coins10: Math.floor(kioskState.changeDue / 10),
-            coins1: kioskState.changeDue % 10
-        });
-    } else if (status === 'completed') {
-        kioskState.receipt = generateReceipt(kioskState);
-        kioskState.mode = 'TICKET_ISSUED';
-        io.emit('state-update', kioskState);
-        setTimeout(() => resetKiosk(), 8000);
-    } else if (status === 'insufficient_funds') {
-        io.emit('status-message', { type: 'warning', text: 'Insufficient funds. Please add more payment.' });
-    } else if (status === 'hardware_error_jam') {
-        io.emit('status-message', { type: 'error', text: 'Hardware Error: Hopper Jam detected! Please call assistance.' });
-        setTimeout(() => resetKiosk(), 8000);
-    }
+  if (status === 'dispensing_change') {
+    io.emit('dispense-change', {
+      amount: kioskState.changeDue,
+      coins10: Math.floor(kioskState.changeDue / 10),
+      coins1: kioskState.changeDue % 10
+    });
+  } else if (status === 'completed') {
+    kioskState.mode = 'TICKET_ISSUED';
+    io.emit('state-update', kioskState);
+    setTimeout(() => resetKiosk(), 8000);
+  } else if (status === 'insufficient_funds') {
+    io.emit('status-message', { type: 'warning', text: 'Insufficient funds. Please add more payment.' });
+  } else if (status === 'hardware_error_jam') {
+    io.emit('status-message', { type: 'error', text: 'Hardware Error: Hopper Jam detected! Please call assistance.' });
+    setTimeout(() => resetKiosk(), 8000);
+  }
 }
-
-// ============================================================
-// HARDWARE ENDPOINTS (HTTP fallback — ESP32 can still POST here)
-// ============================================================
-
-app.post('/api/hardware/event', (req, res) => {
-    const { device, amount, credit, timestamp } = req.body;
-    handleHardwarePayment({ device, amount, credit, timestamp });
-    res.json({ status: "ok", mode: kioskState.mode, credit: kioskState.credit });
-});
-
-app.post('/api/hardware/status', (req, res) => {
-    const { status, changeDue } = req.body;
-    handleHardwareStatus({ status, changeDue });
-    res.json({ status: "ok" });
-});
 
 // ============================================================
 // FRONTEND API ENDPOINTS
 // ============================================================
-
-// Returns config values the frontend needs (e.g. tunnel URL for socket.io)
-app.get('/api/config', (req, res) => {
-    res.json({
-        tunnelUrl: CLOUD_FLARE_TUNNEL_ORIGIN || null
-    });
-});
-
-app.get('/api/routes', (req, res) => res.json(ROUTES));
+app.get('/api/routes', (req, res) => res.json(tenantRoutes));
 
 app.post('/api/action/select-mode', (req, res) => {
-    const { mode } = req.body;
-    resetKiosk();
-    kioskState.mode = mode === 'BOOK' ? 'BOOKING_ROUTE' : 'ONBOARD_SCAN';
-    io.emit('state-update', kioskState);
-    res.json(kioskState);
+  const { mode } = req.body;
+  resetKiosk();
+  kioskState.mode = mode === 'BOOK' ? 'BOOKING_ROUTE' : 'ONBOARD_SCAN';
+  io.emit('state-update', kioskState);
+  res.json(kioskState);
 });
 
-app.post('/api/action/select-route', (req, res) => {
-    const { routeId, passengers } = req.body;
-    const route = ROUTES.find(r => r.id === routeId);
-    
-    if (!route) return res.status(404).json({ error: 'Route not found' });
+app.post('/api/action/select-route', async (req, res) => {
+  const { routeId, passengers } = req.body;
+  const route = tenantRoutes.find(r => r.id === routeId);
+  
+  if (!route) return res.status(404).json({ error: 'Route not found' });
+
+  try {
+    // Hold inventory in V2 API before accepting payment
+    const holdRes = await apiClient.post('/kiosk/hold-inventory', {
+      sessionId: currentSessionId,
+      routeId: route.id,
+      passengers: Math.max(1, Math.min(10, passengers || 1))
+    });
 
     kioskState.selectedRoute = route;
-    kioskState.passengerCount = Math.max(1, Math.min(10, passengers || 1));
-    kioskState.totalPrice = route.price * kioskState.passengerCount;
+    kioskState.passengerCount = holdRes.data.passengerCount;
+    kioskState.totalPrice = holdRes.data.fareTotal;
     kioskState.mode = 'BOOKING_PAYMENT';
     kioskState.credit = 0;
     kioskState.changeDue = 0;
 
-    // Tell the ESP32 the target price so it knows when to dispense change
     sendToESP32(`SET_PRICE:${kioskState.totalPrice}`);
-    
     io.emit('state-update', kioskState);
     res.json(kioskState);
+  } catch (err) {
+    console.error('[V2] Inventory hold failed:', err.response?.data || err.message);
+    res.status(500).json({ error: 'Failed to reserve seats. Please try again.' });
+  }
 });
 
-app.post('/api/action/simulate-scan', (req, res) => {
-    kioskState.qrData = `TICKET-MNL-CEB-${Date.now()}-USR${Math.floor(Math.random()*999)}`;
-    kioskState.receipt = {
-        text: `================================\n     BOARDING PASS VERIFIED     \n================================\n Ticket: ${kioskState.qrData}\n Status: VALID ✅\n Route: Manila → Cebu\n Passengers: 1\n================================\n WELCOME ABOARD!\n================================`,
-        ticketNo: kioskState.qrData,
-        qrData: kioskState.qrData,
-        printable: true
-    };
-    kioskState.mode = 'TICKET_ISSUED';
-    io.emit('state-update', kioskState);
-    setTimeout(() => resetKiosk(), 6000);
-    res.json({ success: true, ticket: kioskState.qrData });
-});
-
-app.post('/api/action/insert-cash', (req, res) => {
-    const { amount } = req.body;
-    if (!amount || amount <= 0) return res.status(400).json({ error: 'Invalid amount' });
-
-    console.log(`[Simulator] Cash insertion requested: ₱${amount}`);
-    
-    // Update local state credit immediately so the UI updates instantly
-    kioskState.credit += amount;
-    io.emit('payment-update', {
-        device: amount >= 50 ? 'bill_acceptor' : 'coin_slot',
-        amount: amount,
-        credit: kioskState.credit,
-        remaining: Math.max(0, kioskState.totalPrice - kioskState.credit),
-        timestamp: new Date().toISOString()
-    });
-
-    if (esp32Port && esp32Port.isOpen) {
-        // Send command to ESP32 to keep its internal state in sync
-        sendToESP32(`ADD_CREDIT:${amount}`);
-    }
-    
-    res.json({ success: true, currentCredit: kioskState.credit });
-});
-
-app.post('/api/action/pay', (req, res) => {
-    if (kioskState.mode !== 'BOOKING_PAYMENT') {
-        return res.status(400).json({ error: 'Not in booking payment mode' });
-    }
-    if (kioskState.credit < kioskState.totalPrice) {
-        return res.status(400).json({ error: 'Insufficient credit' });
-    }
-    
-    finalizePayment();
-    res.json(kioskState);
+app.post('/api/action/pay', async (req, res) => {
+  if (kioskState.mode !== 'BOOKING_PAYMENT') {
+    return res.status(400).json({ error: 'Not in booking payment mode' });
+  }
+  if (kioskState.credit < kioskState.totalPrice) {
+    return res.status(400).json({ error: 'Insufficient credit' });
+  }
+  
+  await finalizePayment();
+  res.json(kioskState);
 });
 
 app.post('/api/action/reset', (req, res) => {
-    resetKiosk();
-    io.emit('state-update', kioskState);
-    res.json({ status: "reset" });
+  resetKiosk();
+  io.emit('state-update', kioskState);
+  res.json({ status: "reset" });
 });
 
 // ============================================================
 // HELPERS
 // ============================================================
+async function finalizePayment() {
+  kioskState.changeDue = kioskState.credit - kioskState.totalPrice;
+  kioskState.mode = 'DISPENSING_CHANGE';
+  io.emit('state-update', kioskState);
+  
+  if (esp32Port && esp32Port.isOpen) {
+    sendToESP32(`DISPENSE:${kioskState.changeDue}`);
+  }
 
-function finalizePayment() {
-    kioskState.changeDue = kioskState.credit - kioskState.totalPrice;
-    kioskState.mode = 'DISPENSING_CHANGE';
+  // ✅ Mock booking when V2 is unavailable
+  if (MOCK_MODE) {
+    setTimeout(() => {
+      kioskState.receipt = { url: '/mock-receipt.pdf', bookingId: `MOCK-${Date.now()}` };
+      kioskState.bookingId = kioskState.receipt.bookingId;
+      kioskState.qrData = `MOCK-QR-${Date.now()}`;
+      kioskState.mode = 'TICKET_ISSUED';
+      io.emit('state-update', kioskState);
+      console.log('[MOCK] Booking simulated successfully');
+      setTimeout(() => resetKiosk(), 8000);
+    }, 1500);
+    return;
+  }
+
+  // Real V2 booking logic below...
+  try {
+    const bookingRes = await apiClient.post('/kiosk/bookings', {
+      sessionId: currentSessionId,
+      routeId: kioskState.selectedRoute.id,
+      passengerCount: kioskState.passengerCount,
+      cashAmount: kioskState.credit,
+      changeGiven: kioskState.changeDue,
+      idempotencyKey: `PAY-${Date.now()}-${kioskState.credit}`
+    });
+
+    kioskState.receipt = bookingRes.data.receipt;
+    kioskState.bookingId = bookingRes.data.bookingId;
+    kioskState.qrData = bookingRes.data.qrCodeData;
+    kioskState.mode = 'TICKET_ISSUED';
     io.emit('state-update', kioskState);
     
-    // If the real ESP32 board is connected, command it to dispense change
-    if (esp32Port && esp32Port.isOpen) {
-        console.log(`[Payment] Real hardware connected. Sending DISPENSE:${kioskState.changeDue} to ESP32.`);
-        sendToESP32(`DISPENSE:${kioskState.changeDue}`);
-        return;
-    }
-
-    // For simulation without hardware, auto-complete after delay:
-    setTimeout(() => {
-        if (kioskState.mode === 'DISPENSING_CHANGE') {
-            kioskState.receipt = generateReceipt(kioskState);
-            kioskState.mode = 'TICKET_ISSUED';
-            io.emit('state-update', kioskState);
-            setTimeout(() => resetKiosk(), 8000);
-        }
-    }, 4000);
+    console.log(`[V2] Booking created: ${kioskState.bookingId}`);
+  } catch (err) {
+    console.error('[V2] Booking failed:', err.response?.data || err.message);
+    io.emit('status-message', { 
+      type: 'error', 
+      text: 'Booking failed. Cash recorded but ticket not issued. Contact staff.' 
+    });
+    // Do NOT auto-reset — let staff intervene for failed bookings
+  }
 }
 
 function resetKiosk() {
-    kioskState = {
-        mode: 'IDLE',
-        selectedRoute: null,
-        passengerCount: 1,
-        totalPrice: 0,
-        credit: 0,
-        changeDue: 0,
-        qrData: null,
-        receipt: null,
-        lastHardwareEvent: null
-    };
-    sendToESP32('RESET'); // sync ESP32 state back to IDLE
+  kioskState = {
+    mode: 'IDLE', selectedRoute: null, passengerCount: 1,
+    totalPrice: 0, credit: 0, changeDue: 0,
+    qrData: null, receipt: null, lastHardwareEvent: null
+  };
+  sendToESP32('RESET');
 }
 
 // ============================================================
 // WEBSOCKET CONNECTION
 // ============================================================
 io.on('connection', (socket) => {
-    console.log(`[WS] Frontend connected: ${socket.id}`);
-    socket.emit('routes-data', ROUTES);
-    socket.emit('state-update', kioskState);
-    
-    socket.on('disconnect', () => {
-        console.log(`[WS] Frontend disconnected: ${socket.id}`);
-    });
+  console.log(`[WS] Frontend connected: ${socket.id}`);
+  socket.emit('routes-data', tenantRoutes);
+  socket.emit('state-update', kioskState);
+  
+  socket.on('disconnect', () => console.log(`[WS] Frontend disconnected: ${socket.id}`));
 });
 
 // ============================================================
 // START SERVER
 // ============================================================
 server.listen(PORT, () => {
-    console.log(`\n🚢 Port Kiosk Tester Server Active`);
-    console.log(`   ️  Frontend: http://localhost:${PORT}`);
-    console.log(`   🔌 ESP32 POST → /api/hardware/event`);
-    console.log(`   🔌 ESP32 POST → /api/hardware/status`);
-    console.log(`   📡 WebSocket: Real-time sync enabled\n`);
+  console.log(`\n🚢 Port Kiosk Bridge Server Active`);
+  console.log(`   ️  Frontend: http://localhost:${PORT}`);
+  console.log(`   🔌 ESP32: ${SERIAL_PORT_PATH} @ ${BAUD_RATE} baud`);
+  console.log(`   ☁️  V2 API: ${V2_API_BASE}`);
+  console.log(`   🆔 Terminal: ${TERMINAL_ID}`);
+  console.log(`   📡 WebSocket: Real-time sync enabled\n`);
 });
